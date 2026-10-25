@@ -1,0 +1,26 @@
+# الأسرار — لا تُرفع أبداً
+.env
+.env.*
+!.env.example
+
+# بيانات السوق المخزّنة مؤقتاً (ثقيلة وتُعاد بناؤها تلقائياً)
+data/cache/
+
+# حالة التشغيل المحلية
+data/paper_state.json
+data/journal.jsonl
+*.log
+
+# بايثون
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# نظام التشغيل / المحرر
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

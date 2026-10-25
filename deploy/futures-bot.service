@@ -1,0 +1,19 @@
+[Unit]
+Description=Futures Signal + Execution Bot (TrendPulse v1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/futures-signal-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/futures-signal-bot/.venv/bin/python src/bot.py
+Restart=always
+RestartSec=10
+# حماية إضافية
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

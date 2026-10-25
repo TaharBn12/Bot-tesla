@@ -1,0 +1,6 @@
+python-telegram-bot==21.11.1
+ccxt==4.4.50
+pandas==2.2.3
+numpy==2.3.5
+PyYAML==6.0.3
+python-dotenv==1.0.1
