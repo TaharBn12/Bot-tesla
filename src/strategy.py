@@ -200,6 +200,48 @@ class TrendPulse(StrategyBase):
         out.loc[bad, ["side"]] = 0
         return out
 
+
+    # ---- تحليل «قرب» الفرصة: أي الشروط تحققت وأيها ناقص ----
+    def readiness(self, df: pd.DataFrame) -> dict:
+        """يخبرنا كم اقتربت الشمعة الأخيرة من إشارة صالحة، وما الشرط الناقص."""
+        last = df.iloc[-1]
+        need = ("ema_f", "ema_m", "ema_s", "atr", "adx", "rsi", "vol_ma", "dc_hi", "dc_lo", "er")
+        if len(df) < 210 or any(pd.isna(last[k]) for k in need):
+            return {"readiness": 0.0, "bias": "—", "missing": ["بيانات غير كافية"]}
+
+        up = last["close"] > last["ema_s"] and last["ema_m"] > last["ema_s"] and last["ema_s_slope"] > 0
+        dn = last["close"] < last["ema_s"] and last["ema_m"] < last["ema_s"] and last["ema_s_slope"] < 0
+        bias = "LONG" if up else ("SHORT" if dn else "محايد")
+
+        checks = {
+            "الاتجاه الكبير (EMA200)": up or dn,
+            "قوة الاتجاه (ADX)": last["adx"] >= self.adx_min,
+            "كفاءة الاتجاه (ER)": last["er"] >= self.er_min,
+            "السيولة (حجم فوق المتوسط)": last["volume"] > self.vol_mult * last["vol_ma"],
+            "التقلب في النطاق الطبيعي": self.atr_min_pct <= last["atr_pct"] <= self.atr_max_pct,
+        }
+        if up or dn:
+            near = abs(last["close"] - last["ema_f"]) / last["atr"] if last["atr"] else 9
+            checks["قرب التصحيح إلى EMA"] = near <= 1.5
+            lo, hi = (self.rsi_long_lo, self.rsi_long_hi) if up else (self.rsi_short_lo, self.rsi_short_hi)
+            checks["منطقة RSI مناسبة"] = lo <= last["rsi"] <= hi
+        else:
+            checks["قرب التصحيح إلى EMA"] = False
+            checks["منطقة RSI مناسبة"] = False
+
+        passed = sum(1 for v in checks.values() if v)
+        missing = [k for k, v in checks.items() if not v]
+        return {
+            "readiness": round(passed / len(checks) * 100, 0),
+            "bias": bias,
+            "missing": missing,
+            "adx": round(float(last["adx"]), 1),
+            "er": round(float(last["er"]), 2),
+            "rsi": round(float(last["rsi"]), 1),
+            "atr_pct": round(float(last["atr_pct"]), 2),
+            "price": float(last["close"]),
+        }
+
     def to_signal(self, symbol: str, row: pd.Series) -> Signal:
         side = "LONG" if row["side"] == 1 else "SHORT"
         tps = [row[f"tp{k + 1}"] for k in range(len(self.rr))]

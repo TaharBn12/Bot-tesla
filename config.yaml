@@ -1,26 +1,36 @@
-# إعدادات البوت — TrendPulse v1 (مُختبرة على 3.6 سنة بيانات 4h)
-exchange: binanceusdm
-timeframe: "4h"            # 4h = الفريم الذي أثبت إيجابية (1h خسر في الاختبار)
+# ══════════════════════════════════════════════════════════════
+#  إعدادات البوت — TrendPulse v1
+#  بعد أي تعديل: أعد تشغيل البوت (Ctrl+C ثم python src/bot.py)
+# ══════════════════════════════════════════════════════════════
+
+# ---- البورصة ----
+exchange: binanceusdm      # binanceusdm | bybit | okx
+symbols: []                # فارغة = تلقائي: أعلى 40 زوج سيولة
+
+# ---- الاستراتيجية ----
+strategy: trend_pulse      # trend_pulse | mean_rev | ema_cross_example
+strategy_params: {}        # يمكن تجاوز أي معامل هنا، مثال: {adx_min: 25}
+timeframe: "4h"            # 4h = الفريم المُختبر (1h خاسر في الاختبار)
+leverage: 5                # رافعة مقترحة (للإشارة فقط في وضع signals)
+
+# ---- وتيرة الإشارات ----
 scan_interval: 300         # كل 5 دقائق يفحص (الإشارات تُولد على إغلاق شمعة 4h)
 cooldown_minutes: 720      # لا تكرر إشارة نفس الزوج/الاتجاه قبل 12 ساعة
 max_signals_per_scan: 4    # أقصى إشارات في الدورة الواحدة
-universe_size: 40          # وضع مكثف: أعلى 40 زوج سيولة تلقائياً
-leverage: 5                # رافعة مقترحة (الستوب ~5% => رافعة عالية خطرة)
+universe_size: 40          # عدد الأزواج في الوضع المكثف
+signal_expiry_hours: 72    # بعدها تُعتبر الإشارة منتهية
+
+# ---- إدارة المخاطر ----
 risk_per_trade_pct: 1.0
-mode: signals              # signals فقط حالياً
-strategy: trend_pulse      # trend_pulse | mean_rev | ema_cross_example
-max_open_positions: 3      # ⭐ الأهم: سقف 3 صفقات متزامنة (PF 1.26 وتراجع -16% بدل -35%)
-signal_expiry_hours: 72    # متوسط مدة الصفقة تاريخياً ~68 ساعة
-strategy_params: {}        # يمكن تجاوز أي معامل هنا
-symbols: []                # فارغة = تلقائي (أعلى 40 سيولة)
+max_open_positions: 3      # ⭐ سقف الصفقات المتزامنة (يخفض التراجع من -35% إلى -16%)
 
-# ═══ التنفيذ الآلي (المرحلة الثانية) ═══
-mode: autotrade            # signals = إشارات فقط | autotrade = تنفيذ فعلي
-dry_run: true              # true = يسجّل ما كان سيفعله بلا إرسال أوامر (ابدأ بهذا)
+# ---- التنفيذ الآلي ----
+mode: signals              # signals = إشارات فقط (ابدأ بهذا) | autotrade = تنفيذ فعلي
+dry_run: true              # في وضع autotrade: يسجّل ما كان سيفعله بلا إرسال أوامر
 paper_balance: 1000        # الرصيد الافتراضي في الوضع الورقي
-trail_atr: 3.5             # مضاعف ATR للستوب المتتبّع (نفس المستخدم في الاختبار)
+trail_atr: 3.5             # مضاعف ATR للستوب المتتبّع
 
-# مفتاح الإيقاف التلقائي (حماية من يوم سيئ)
-max_daily_loss_pct: 3.0    # توقف إذا خسر اليوم 3% من الرصيد
-max_trades_per_day: 6      # لا أكثر من 6 صفقات يومياً
-max_consecutive_losses: 4   # توقف بعد 4 خسائر متتالية
+# ---- مفتاح الإيقاف التلقائي (يُستخدم في وضع autotrade) ----
+max_daily_loss_pct: 3.0
+max_trades_per_day: 6
+max_consecutive_losses: 4

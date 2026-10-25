@@ -100,6 +100,25 @@ class Scanner:
         if not self._symbols:
             await self.refresh_universe()
 
+    async def nearest(self, n: int = 6) -> list[dict]:
+        """أقرب الأزواج إلى إشارة صالحة + السبب الناقص (لأمر /near)."""
+        sem = asyncio.Semaphore(8)
+
+        async def work(sym):
+            async with sem:
+                try:
+                    df = await self.feed.candles(sym, self.s.timeframe, 400)
+                    self.strategy.prepare(df)
+                    r = self.strategy.readiness(df)
+                    r["symbol"] = sym
+                    return r
+                except Exception:
+                    return None
+
+        rows = [r for r in await asyncio.gather(*(work(x) for x in self._symbols)) if r]
+        rows.sort(key=lambda x: x.get("readiness", 0), reverse=True)
+        return rows[:n]
+
     async def run_forever(self):
         await self.ensure_universe()
         while True:
