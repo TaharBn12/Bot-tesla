@@ -89,11 +89,21 @@ async def send_signal(sig: Signal):
         tok = uuid.uuid4().hex[:10]
         PENDING[tok] = {"sig": sig, "exp": time.time() + APPROVAL_TTL,
                         "chat": settings.chat_id, "msg_id": None}
+
+        # إشارات المسح من okx — قد لا يكون الزوج موجوداً على Binance
+        can_exec = await _tradable(sig.symbol)
+        if can_exec:
+            kb = _kb(tok)
+            note = "\n\n⏳ <b>بانتظار موافقتك</b> — اضغط ✅ للتنفيذ على البورصة"
+        else:
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ تجاهل", callback_data=f"rj:{tok}")]])
+            note = ("\n\n🚫 <b>غير متاح على Binance Futures</b>\n"
+                    "الزوج موجود على بورصة المسح فقط — لا يمكن تنفيذه.")
         try:
             m = await app.bot.send_message(
-                settings.chat_id,
-                text + "\n\n⏳ <b>بانتظار موافقتك</b> — اضغط ✅ للتنفيذ على البورصة",
-                parse_mode=ParseMode.HTML, reply_markup=_kb(tok))
+                settings.chat_id, text + note,
+                parse_mode=ParseMode.HTML, reply_markup=kb)
             PENDING[tok]["msg_id"] = m.message_id
         except Exception as e:
             log.error("تعذّر إرسال رسالة الموافقة: %s", e)
@@ -145,6 +155,33 @@ async def cmd_demo(u: Update, c: ContextTypes.DEFAULT_TYPE):
             f"⚠️ تعذّر جلب السعر: <code>{esc(str(e)[:150])}</code>", parse_mode=ParseMode.HTML)
 
     await send_signal(sig)
+
+
+_BINANCE_OK: dict[str, bool] = {}
+
+
+async def _tradable(symbol: str) -> bool:
+    """هل الزوج متاح للتداول على Binance Futures؟ (إشارات المسح تأتي من okx)"""
+    if executor is None:
+        return False
+    if symbol in _BINANCE_OK:
+        return _BINANCE_OK[symbol]
+    ok = False
+    try:
+        ex = executor.ex
+        await asyncio.to_thread(ex.load_markets)
+        m = ex.market(symbol) if symbol in ex.markets else None
+        info = (m or {}).get("info") or {}
+        status = str(info.get("status", "")).upper()
+        # بعض الأزواج موجودة لكن حالتها SETTLING/DELIVERING → Binance يرفض
+        # فتح صفقة عليها بخطأ -4140 «Invalid symbol status»
+        ok = (bool(m) and m.get("swap", False)
+              and status == "TRADING" and m.get("active", True))
+    except Exception as e:
+        log.warning("تعذّر التحقق من %s على Binance: %s", symbol, e)
+        ok = False
+    _BINANCE_OK[symbol] = ok
+    return ok
 
 
 # ═══════════════ الموافقة اليدوية على الصفقات ═══════════════
