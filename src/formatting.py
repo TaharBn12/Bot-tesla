@@ -35,6 +35,26 @@ def fmt_signal(sig: Signal, settings) -> str:
     return "\n".join(lines)
 
 
+def fmt_opportunity_card(o, settings) -> str:
+    """بطاقة فرصة واحدة — تُستخدم في القائمة وفي رسالة الموافقة المنفردة."""
+    tag = "🟢 شراء" if o.side == "LONG" else "🔴 بيع"
+    grade = {"A": "🅰️ مكتملة", "B": "🅱️ قوية", "C": "🆑 ممكنة"}.get(o.grade, o.grade)
+    tps = " / ".join(f"<code>{t:.6g}</code>" for t in o.targets)
+    lines = [
+        f"<b>{esc(o.symbol)}</b> — {tag} | {grade} | جاهزية {o.readiness:.0f}%",
+        "──────────────",
+        f"▶ دخول الآن: <code>{o.entry:.6g}</code>",
+        f"▶ أفضل منطقة: <code>{o.entry_zone[0]:.6g} → {o.entry_zone[1]:.6g}</code>",
+        f"▶ ستوب: <code>{o.stop:.6g}</code> ({o.risk_pct}%)",
+        f"▶ أهداف: {tps}",
+        f"▶ كمية (مخاطرة {settings.risk_per_trade_pct}%): <code>{o.qty}</code> ≈ {o.notional:g}$ | {o.leverage}x",
+        f"▶ السبب: {esc(o.reason)}",
+    ]
+    if o.missing:
+        lines.append(f"▶ ينقص: {esc('، '.join(o.missing))}")
+    return "\n".join(lines)
+
+
 def fmt_positions(pos: list, equity: float, kill: dict) -> str:
     if not pos:
         return f"لا مراكز مفتوحة.\nالرصيد: <code>{equity:.2f}</code> USDT"
@@ -80,23 +100,7 @@ def fmt_opportunities(opps: list, mood: dict, settings, scanned: int = 0) -> str
         f"ميل السوق: <b>{esc(mood['mood'])}</b> ({mood['LONG']} شراء / {mood['SHORT']} بيع)",
         "──────────────",
     ]
-    blocks = []
-    for o in opps:
-        tag = "🟢 شراء" if o.side == "LONG" else "🔴 بيع"
-        grade = {"A": "🅰️ مكتملة", "B": "🅱️ قوية", "C": "🆑 ممكنة"}.get(o.grade, o.grade)
-        tps = " / ".join(f"<code>{t:.6g}</code>" for t in o.targets)
-        lines = [
-            f"<b>{esc(o.symbol)}</b> — {tag} | {grade} | جاهزية {o.readiness:.0f}%",
-            f"  ▶ دخول الآن: <code>{o.entry:.6g}</code>",
-            f"  ▶ أفضل منطقة: <code>{o.entry_zone[0]:.6g} → {o.entry_zone[1]:.6g}</code>",
-            f"  ▶ ستوب: <code>{o.stop:.6g}</code> ({o.risk_pct}%)",
-            f"  ▶ أهداف: {tps}",
-            f"  ▶ كمية (مخاطرة {settings.risk_per_trade_pct}%): <code>{o.qty}</code> ≈ {o.notional}$ | {o.leverage}x",
-            f"  ▶ السبب: {esc(o.reason)}",
-        ]
-        if o.missing:
-            lines.append(f"  ▶ ينقص: {esc('، '.join(o.missing))}")
-        blocks.append("\n".join(lines))
+    blocks = [fmt_opportunity_card(o, settings) for o in opps]
     foot = ["──────────────",
             "🅰️ = إشارة مكتملة تُرسل تلقائياً | 🅱️ = ينقص شرط واحد | 🆑 = ينقص أكثر من شرط",
             "⚠️ خطة للدراسة لا ضمان. الأفضل الانتظار حتى تصبح 🅰️"]

@@ -18,7 +18,8 @@ from risk import KillSwitch
 from strategy import Signal
 import tracker
 import opportunities as opp_mod
-from formatting import esc, fmt_opportunities, fmt_positions, fmt_signal, fmt_status
+from formatting import (esc, fmt_opportunities, fmt_opportunity_card, fmt_positions,
+                        fmt_signal, fmt_status)
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("bot")
@@ -215,6 +216,8 @@ async def on_approval(u: Update, c: ContextTypes.DEFAULT_TYPE):
     action, _, tok = data.partition(":")
     rec = PENDING.get(tok)
 
+    base = (rec or {}).get("text") or (fmt_signal(rec["sig"], settings) if rec else "")
+
     async def edit(txt: str):
         try:
             # نمرّر لوحة فارغة لإزالة الأزرار بعد الضغط (وإلا تبقى قابلة للنقر)
@@ -237,39 +240,39 @@ async def on_approval(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # ❌ تجاهل
     if action == "rj":
         PENDING.pop(tok, None)
-        return await edit(fmt_signal(sig, settings) + "\n\n❌ <b>تم التجاهل — لم تُنفَّذ</b>")
+        return await edit(base + "\n\n❌ <b>تم التجاهل — لم تُنفَّذ</b>")
 
     # انتهت المدة
     if time.time() > rec["exp"]:
         PENDING.pop(tok, None)
-        return await edit(fmt_signal(sig, settings) + "\n\n⌛ <b>انتهت الصلاحية — لم تُنفَّذ</b>")
+        return await edit(base + "\n\n⌛ <b>انتهت الصلاحية — لم تُنفَّذ</b>")
 
     if executor is None:
         PENDING.pop(tok, None)
         return await edit("⚠️ المحرّك غير مفعّل — شغّل البوت بوضع <code>approve</code>")
 
     # ✅ تنفيذ
-    await edit(fmt_signal(sig, settings) + "\n\n⏳ <b>جاري التنفيذ على البورصة…</b>")
+    await edit(base + "\n\n⏳ <b>جاري التنفيذ على البورصة…</b>")
     try:
         pos = await asyncio.to_thread(executor.open, sig)
     except Exception as e:
         log.exception("فشل التنفيذ من زر الموافقة")
         PENDING.pop(tok, None)
-        return await edit(fmt_signal(sig, settings) +
+        return await edit(base +
                           f"\n\n❌ <b>فشل التنفيذ</b>\n<code>{esc(type(e).__name__)}: {esc(str(e)[:180])}</code>")
 
     PENDING.pop(tok, None)
 
     if pos:
         return await edit(
-            fmt_signal(sig, settings) +
+            base +
             f"\n\n✅ <b>نُفِّذت الصفقة — {_exec_mode_tag()}</b>\n"
             f"<code>{esc(pos.side)} {esc(pos.symbol)}</code>\n"
             f"الكمية: <code>{esc(pos.qty)}</code> @ <code>{esc(pos.entry)}</code>\n"
             f"الستوب على البورصة: <code>{esc(pos.sl)}</code>\n"
             f"المخاطرة: {esc(pos.risk_amount)} USDT")
 
-    return await edit(fmt_signal(sig, settings) +
+    return await edit(base +
                       "\n\n⚠️ <b>لم تُفتح الصفقة</b> — راجع "
                       "<code>data/journal.jsonl</code> (غالباً: سقف الصفقات أو مفتاح الإيقاف)")
 
@@ -314,6 +317,40 @@ async def cmd_ping(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f"الأزواج: {len(scanner._symbols) if scanner else 0} | "
         f"المسحات: {scanner.stats['scans'] if scanner else 0}",
         reply_markup=MENU)
+
+
+def _opp_to_signal(o):
+    """تحويل فرصة إلى Signal كي يمرّ التنفيذ على نفس المسار المُختبَر."""
+    return Signal(symbol=o.symbol, side=o.side, entry=o.entry, stop_loss=o.stop,
+                  take_profits=list(o.targets), leverage=o.leverage,
+                  reason=o.reason, atr=getattr(o, "atr", 0.0), setup=f"opp_{o.grade}")
+
+
+async def send_opp_approval(o) -> bool:
+    """يرسل فرصة واحدة كرسالة مستقلة وتحتها زر موافقة."""
+    tok = uuid.uuid4().hex[:10]
+    sig = _opp_to_signal(o)
+    text = fmt_opportunity_card(o, settings)
+    PENDING[tok] = {"sig": sig, "exp": time.time() + APPROVAL_TTL,
+                    "chat": settings.chat_id, "msg_id": None, "text": text}
+
+    can_exec = await _tradable(o.symbol)
+    if can_exec:
+        kb = _kb(tok)
+        note = "\n\n⏳ <b>بانتظار موافقتك</b> — اضغط ✅ للتنفيذ"
+    else:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ تجاهل", callback_data=f"rj:{tok}")]])
+        note = ("\n\n🚫 <b>غير متاح على Binance Futures</b>\n"
+                "موجود على بورصة المسح فقط — لا يمكن تنفيذه.")
+    try:
+        m = await app.bot.send_message(settings.chat_id, text + note,
+                                       parse_mode=ParseMode.HTML, reply_markup=kb)
+        PENDING[tok]["msg_id"] = m.message_id
+        return can_exec
+    except Exception as e:
+        log.warning("تعذّر إرسال بطاقة %s: %s", o.symbol, e)
+        PENDING.pop(tok, None)
+        return False
 
 
 @safe
@@ -371,22 +408,24 @@ async def btn_opportunities(u: Update, c: ContextTypes.DEFAULT_TYPE):
             f"من <b>{st.get('symbols_total', 0)}</b> زوجاً\n\n"
             "<i>اضغط «🔍 فحص السوق» لفحص فوري.</i>", parse_mode=ParseMode.HTML)
     mood = opp_mod.market_mood(opps)
-    head = (f"🆕 <b>صفقات جديدة</b> — لم تُعرض سابقاً\n"
+    head = (f"🆕 <b>{len(opps)} صفقة جديدة</b>\n"
             f"<i>دُرِس {st.get('symbols_studied', 0)} من {st.get('symbols_total', 0)} زوجاً "
-            f"· الدورة {st.get('last_cycle_sec', 0)}s</i>\n\n")
-    text = head + fmt_opportunities(opps, mood, settings, scanned=st.get("last_batch", 0))
-    ok = False
-    for chunk in _split(text, 3800):
-        try:
-            await u.message.reply_text(chunk, parse_mode=ParseMode.HTML, reply_markup=MENU)
-            ok = True
-        except Exception:
-            try:
-                await u.message.reply_text(chunk, reply_markup=MENU); ok = True
-            except Exception as e2:
-                log.warning("تعذّر الإرسال: %s", e2)
-    if not ok:
-        await u.message.reply_text("⚠️ تعذّر الإرسال — جرّب مرة أخرى.")
+            f"· الدورة {st.get('last_cycle_sec', 0)}s · ميل السوق {esc(mood['mood'])}</i>\n"
+            "أرسل كل صفقة في رسالة مستقلة وتحتها زر موافقتها 👇")
+    await u.message.reply_text(head, parse_mode=ParseMode.HTML, reply_markup=MENU)
+
+    sent = 0
+    for o in opps:
+        if await send_opp_approval(o):
+            sent += 1
+        await asyncio.sleep(0.35)      # تفادي حدود تلجرام
+
+    if sent == 0:
+        await u.message.reply_text(
+            "⚠️ لا صفقة من هذه القائمة قابلة للتنفيذ على Binance "
+            "(أزواج بورصة المسح فقط).", parse_mode=ParseMode.HTML)
+
+
 
 
 async def btn_market(u: Update, c: ContextTypes.DEFAULT_TYPE):
