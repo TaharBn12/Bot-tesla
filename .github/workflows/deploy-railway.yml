@@ -11,6 +11,7 @@ on:
       - "Dockerfile"
       - "config.yaml"
       - "railway.json"
+      - ".github/workflows/deploy-railway.yml"
   workflow_dispatch:
     inputs:
       reason:
@@ -30,6 +31,10 @@ jobs:
     name: نشر إلى Railway
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    defaults:
+      run:
+        # مهم: بدونه `railway up | tee` يُخفي فشل Railway ويظهر نجاحاً زائفاً
+        shell: bash -o pipefail {0}
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +42,6 @@ jobs:
       #  Railway يقبل نوعين من الرموز:
       #    Account Token  → RAILWAY_API_TOKEN   (يعمل مع أي مشروع)
       #    Project Token  → RAILWAY_TOKEN       (مرتبط بمشروع واحد)
-      #  نجرّب الموجود، ثم نجرّب الآخر بنفس القيمة عند الفشل.
       # ════════════════════════════════════════════════════════
       - name: تجهيز الرموز
         id: prep
@@ -49,13 +53,12 @@ jobs:
           PROJ=$(printf '%s' "$PROJ_SECRET" | tr -d '[:space:]')
           echo "طول رمز الحساب : ${#API}"
           echo "طول رمز المشروع: ${#PROJ}"
-
           if [ -n "$API" ]; then
             echo "mode=account" >> "$GITHUB_OUTPUT"
             echo "::notice::سيُستخدم رمز الحساب (RAILWAY_API_TOKEN)"
           elif [ -n "$PROJ" ]; then
             echo "mode=project" >> "$GITHUB_OUTPUT"
-            echo "::notice::سيُستخدم الرمز الموجود (RAILWAY_TOKEN) — تُجرَّب الصيغتان"
+            echo "::notice::سيُستخدم الرمز الموجود (RAILWAY_TOKEN)"
           else
             echo "mode=none" >> "$GITHUB_OUTPUT"
             echo "::notice::لا يوجد رمز Railway — تجاوز النشر."
@@ -65,13 +68,52 @@ jobs:
         if: steps.prep.outputs.mode != 'none'
         run: npm install -g @railway/cli
 
-      - name: إصدار CLI
-        if: steps.prep.outputs.mode != 'none'
-        run: railway --version
+      # ════════════ كشف الخدمة (مطلوب: المشروع فيه أكثر من خدمة) ════════════
+      - name: كشف الخدمة
+        id: svc
+        if: steps.prep.outputs.mode == 'project'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SERVICE_SECRET: ${{ secrets.RAILWAY_SERVICE }}
+          ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+        run: |
+          export RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
+          ENV_NAME="${ENVIRONMENT:-production}"
+          echo "env=$ENV_NAME" >> "$GITHUB_OUTPUT"
 
-      # ════════════ (أ) رمز حساب معروف ════════════
+          SVC="$SERVICE_SECRET"
+          if [ -z "$SVC" ]; then
+            echo "── خدمات المشروع ──"
+            if ! railway service list --json > /tmp/svc.json 2>/tmp/svc.err; then
+              railway service list -e "$ENV_NAME" --json > /tmp/svc.json 2>>/tmp/svc.err || true
+            fi
+            cat /tmp/svc.err 2>/dev/null | head -5 || true
+            cat /tmp/svc.json 2>/dev/null | head -40 || true
+            railway service list 2>&1 | head -20 || true
+            SVC=$(python3 scripts/railway_discover.py services /tmp/svc.json 2>/dev/null || true)
+          fi
+
+          if [ -z "$SVC" ]; then
+            echo "::error::المشروع فيه أكثر من خدمة. أضف السر RAILWAY_SERVICE باسم الخدمة الصحيحة (من القائمة أعلاه)."
+            exit 1
+          fi
+          echo "✅ الخدمة: $SVC"
+          echo "svc=$SVC" >> "$GITHUB_OUTPUT"
+
+      # ════════════ النشر (رمز المشروع) ════════════
+      - name: النشر برمز المشروع
+        if: steps.prep.outputs.mode == 'project'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SVC: ${{ steps.svc.outputs.svc }}
+        run: |
+          export RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
+          echo "── نشر الخدمة: $SVC ──"
+          railway up --ci --service "$SVC" 2>&1 | tee /tmp/deploy.log
+          echo "✅ اكتمل النشر بلا أخطاء"
+
+      # ════════════ النشر (رمز الحساب) ════════════
       - name: النشر برمز الحساب
-        id: acc
         if: steps.prep.outputs.mode == 'account'
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
@@ -89,7 +131,7 @@ jobs:
             railway list --json > /tmp/projects.json 2>/dev/null || true
             PID=$(python3 scripts/railway_discover.py projects /tmp/projects.json)
             if [ -z "$PID" ]; then
-              echo "::error::لم يُحدَّد المشروع (صفر أو أكثر من مشروع). أضف RAILWAY_PROJECT_ID."
+              echo "::error::لم يُحدَّد المشروع. أضف RAILWAY_PROJECT_ID."
               railway list 2>&1 | head -15 || true
               exit 1
             fi
@@ -101,74 +143,15 @@ jobs:
             railway service list -p "$PID" -e "$ENV_NAME" --json > /tmp/svc.json 2>/dev/null || true
             SVC=$(python3 scripts/railway_discover.py services /tmp/svc.json)
           fi
-          [ -n "$SVC" ] && echo "✅ الخدمة: $SVC"
-
-          echo "── بدء النشر ──"
-          if [ -n "$SVC" ]; then
-            railway up --ci -p "$PID" -e "$ENV_NAME" -s "$SVC" 2>&1 | tee /tmp/deploy.log
-          else
-            railway up --ci -p "$PID" -e "$ENV_NAME" 2>&1 | tee /tmp/deploy.log
-          fi
-          echo "pid=$PID" >> "$GITHUB_OUTPUT"
-          echo "env=$ENV_NAME" >> "$GITHUB_OUTPUT"
-          echo "svc=$SVC" >> "$GITHUB_OUTPUT"
-
-      # ════════════ (ب) الرمز في خانة المشروع — محاولة ١ ════════════
-      - name: المحاولة ١ — كمفتاح مشروع
-        id: try_project
-        if: steps.prep.outputs.mode == 'project'
-        continue-on-error: true
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          export RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
-          echo "── محاولة النشر كمفتاح مشروع ──"
-          railway up --ci 2>&1 | tee /tmp/deploy.log
-
-      # ════════════ (ج) نفس الرمز — محاولة ٢ كمفتاح حساب ════════════
-      - name: المحاولة ٢ — نفس الرمز كمفتاح حساب
-        id: try_account
-        if: steps.prep.outputs.mode == 'project' && steps.try_project.outcome == 'failure'
-        env:
-          SAME_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
-          ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
-          SERVICE: ${{ secrets.RAILWAY_SERVICE }}
-        run: |
-          export RAILWAY_API_TOKEN=$(printf '%s' "$SAME_TOKEN" | tr -d '[:space:]')
-          ENV_NAME="${ENVIRONMENT:-production}"
-          echo "── محاولة النشر كمفتاح حساب (البيئة: $ENV_NAME) ──"
-          railway whoami 2>&1 | head -3 || true
-
-          PID="$PROJECT_ID"
-          if [ -z "$PID" ]; then
-            railway list --json > /tmp/projects.json 2>/dev/null || true
-            PID=$(python3 scripts/railway_discover.py projects /tmp/projects.json)
-            if [ -z "$PID" ]; then
-              echo "::error::الرمز صالح كمفتاح حساب لكن المشروع غير محدد. أضف RAILWAY_PROJECT_ID."
-              echo "── المشاريع المتاحة ──"
-              railway list 2>&1 | head -15 || true
-              exit 1
-            fi
-          fi
-          echo "✅ المشروع: $PID"
-
-          SVC="$SERVICE"
           if [ -z "$SVC" ]; then
-            railway service list -p "$PID" -e "$ENV_NAME" --json > /tmp/svc.json 2>/dev/null || true
-            SVC=$(python3 scripts/railway_discover.py services /tmp/svc.json)
+            echo "::error::المشروع فيه أكثر من خدمة. أضف RAILWAY_SERVICE."
+            railway service list -p "$PID" -e "$ENV_NAME" 2>&1 | head -20 || true
+            exit 1
           fi
-          [ -n "$SVC" ] && echo "✅ الخدمة: $SVC"
-
+          echo "✅ الخدمة: $SVC"
           echo "── بدء النشر ──"
-          if [ -n "$SVC" ]; then
-            railway up --ci -p "$PID" -e "$ENV_NAME" -s "$SVC" 2>&1 | tee /tmp/deploy.log
-          else
-            railway up --ci -p "$PID" -e "$ENV_NAME" 2>&1 | tee /tmp/deploy.log
-          fi
-          echo "pid=$PID" >> "$GITHUB_OUTPUT"
-          echo "env=$ENV_NAME" >> "$GITHUB_OUTPUT"
-          echo "svc=$SVC" >> "$GITHUB_OUTPUT"
+          railway up --ci -p "$PID" -e "$ENV_NAME" -s "$SVC" 2>&1 | tee /tmp/deploy.log
+          echo "✅ اكتمل النشر بلا أخطاء"
 
       # ════════════ الملخص ════════════
       - name: ملخص النتيجة
@@ -181,31 +164,18 @@ jobs:
             if [ "$MODE" = "none" ]; then
               echo "⏭️ **تم التجاوز** — لا يوجد أي رمز Railway."
             elif [ "${{ job.status }}" = "success" ]; then
-              if [ "${{ steps.try_project.outcome }}" = "success" ]; then
-                echo "✅ **نجح النشر بمفتاح المشروع.**"
-              elif [ "${{ steps.try_account.outcome }}" = "success" ]; then
-                echo "✅ **نجح النشر** — عبر المحاولة ٢ (الرمز كمفتاح **حساب**)."
-                echo ""
-                echo "> رمزك من نوع Account Token. الأنظف وضعه في السر \`RAILWAY_API_TOKEN\`."
-              else
-                echo "✅ **نجح النشر** برمز الحساب."
-              fi
+              echo "✅ **نجح النشر** — الوضع: \`$MODE\` · الخدمة: \`${{ steps.svc.outputs.svc }}\`"
               echo ""
-              echo "| العنصر | القيمة |"
-              echo "|---|---|"
-              echo "| المشروع | \`${{ steps.acc.outputs.pid }}${{ steps.try_account.outputs.pid }}\` |"
-              echo "| البيئة | \`${{ steps.acc.outputs.env }}${{ steps.try_account.outputs.env }}\` |"
-              echo "| الخدمة | \`${{ steps.acc.outputs.svc }}${{ steps.try_account.outputs.svc }}\` |"
+              echo "> هذه المرة الفشل الحقيقي لا يُخفى: \`pipefail\` مفعّل."
             else
-              echo "❌ **فشل النشر في كل المحاولات.**"
+              echo "❌ **فشل النشر — ولم يُخفَ هذه المرة.**"
               echo ""
-              echo "| السبب المحتمل | الحل |"
+              echo "| السبب | الحل |"
               echo "|---|---|"
-              echo "| الرمز منتهٍ أو محذوف | أنشئ رمزاً جديداً من Account Settings → Tokens |"
-              echo "| الرمز بلا صلاحية على المشروع | أعد إنشاء Project Token من داخل المشروع |"
-              echo "| أكثر من مشروع | أضف \`RAILWAY_PROJECT_ID\` |"
-              echo "| المشروع بلا خدمة | أنشئ خدمة من لوحة Railway ثم أعد المحاولة |"
-              echo "| لا يوجد رصيد/تجربة منتهية | Railway يطلب طريقة دفع بعد انتهاء الرصيد |"
+              echo "| أكثر من خدمة في المشروع | أضف \`RAILWAY_SERVICE\` باسم الخدمة |"
+              echo "| الرمز منتهٍ أو محذوف | أنشئ رمزاً جديداً |"
+              echo "| الرمز بلا صلاحية | أعد إنشاء Project Token من داخل المشروع |"
+              echo "| لا رصيد في حساب Railway | أضف طريقة دفع أو رصيداً |"
             fi
             echo ""
             echo "**الالتزام:** \`${{ github.sha }}\` · **المشغّل:** ${{ github.actor }}"
