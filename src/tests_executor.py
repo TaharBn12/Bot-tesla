@@ -69,6 +69,12 @@ class FakeExchange:
 
     def cancel_order(self, oid, symbol): self.cancelled.append(oid)
 
+    # Binance تخزّن ستوب closePosition في مساحة Algo Orders
+    def fapiPrivateDeleteAlgoOrder(self, params):
+        self.algo_cancelled = getattr(self, "algo_cancelled", [])
+        self.algo_cancelled.append(params.get("algoId"))
+        return {"algoId": params.get("algoId"), "code": "200"}
+
 
 @dataclass
 class Sig:
@@ -190,7 +196,10 @@ def test_trailing():
     check("صعود جديد يرفع الستوب", exf.proposed_stop(p, high=120, low=110, atr=2.0) == 113.0)
 
     check("تحديث الستوب نُفّذ", exf.trail("BTC/USDT:USDT", 103.0) is True)
-    check("الستوب القديم أُلغي", old_id in ex.cancelled, ex.cancelled)
+    # الستوب يُلغى الآن عبر Algo Orders لا cancel_order العادي
+    check("الستوب القديم أُلغي (Algo)",
+          old_id in getattr(ex, "algo_cancelled", []) or old_id in ex.cancelled,
+          getattr(ex, "algo_cancelled", None))
     stop2 = ex.orders[-1]
     check("ستوب جديد بسعر 103", stop2["params"].get("stopPrice") == 103.0, stop2["params"])
     check("الستوب في الذاكرة تحدّث", exf.positions()[0].sl == 103.0)
@@ -257,6 +266,32 @@ def test_paper_lifecycle():
     check("لا صفقات مفتوحة بعد الإغلاق", pe.positions() == [])
 
 
+
+
+def test_algo_stop_cancel():
+    print("\n[10] إلغاء ستوب Algo (Binance -2011)")
+    ex = FakeExchange()
+    exf = BinanceExecutor(Sett(), exchange=ex)
+    pos = exf.open(Sig())
+    check("فُتحت صفقة", pos is not None)
+    check("حُفظ معرّف الستوب", bool(pos.stop_order_id), pos.stop_order_id)
+    ok = exf._cancel_stop(pos)
+    check("الإلغاء عبر Algo نجح", ok is True)
+    check("استُخدم algoId لا orderId",
+          getattr(ex, "algo_cancelled", []) == [pos.stop_order_id],
+          getattr(ex, "algo_cancelled", None))
+    check("لم يُستدعَ cancel_order العادي", pos.stop_order_id not in ex.cancelled)
+
+    # إن فشل الإلغاء أيضاً: لا يرمي استثناء
+    class BadAlgo(FakeExchange):
+        def fapiPrivateDeleteAlgoOrder(self, params):
+            raise Exception("-2011 Unknown order sent.")
+    ex2 = BadAlgo()
+    exf2 = BinanceExecutor(Sett(), exchange=ex2)
+    p2 = exf2.open(Sig())
+    check("فشل الإلغاء لا يرمي استثناء", exf2._cancel_stop(p2) in (True, False))
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("اختبارات التنفيذ الآلي (بلا إنترنت / بلا مفاتيح)")
@@ -270,6 +305,7 @@ if __name__ == "__main__":
     test_kill_switch()
     test_dry_run_and_safety()
     test_paper_lifecycle()
+    test_algo_stop_cancel()
     print("\n" + "=" * 60)
     print(f"النتيجة: {PASS} نجح | {FAIL} فشل")
     print("=" * 60)

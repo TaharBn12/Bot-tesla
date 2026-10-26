@@ -338,13 +338,40 @@ class BinanceExecutor(BaseExecutor):
         # --- الستوب الواقي: إن فشل نُغلق الصفقة فوراً ---
         try:
             stop = self._place_stop(pos)
-            pos.stop_order_id = str(stop.get("id", ""))
+            # أوامر Algo تعيد algoId لا id
+            pos.stop_order_id = str(stop.get("id") or stop.get("algoId") or stop.get("info", {}).get("algoId") or "")
         except Exception as e:
             journal("critical", symbol=sig.symbol, reason=f"فشل وضع الستوب: {e} — إغلاق فوري")
             self._flatten_now(sig.symbol, pos)
             return None
         self._pos[sig.symbol] = pos
         return pos
+
+    def _cancel_stop(self, pos: Position) -> bool:
+        """إلغاء ستوب closePosition.
+
+        Binance تخزّن أوامر STOP_MARKET مع closePosition في مساحة «Algo Orders»
+        وليس في /fapi/v1/order — لذلك cancel_order العادي يفشل بخطأ -2011.
+        الإلغاء الصحيح: DELETE /fapi/v1/algoOrder.
+        """
+        oid = str(pos.stop_order_id or "")
+        if not oid:
+            return True
+        # (أ) الإلغاء الصحيح لأوامر Algo
+        try:
+            self.ex.fapiPrivateDeleteAlgoOrder({"algoId": oid})
+            journal("stop_cancelled", symbol=pos.symbol, order_id=oid, via="algo")
+            return True
+        except Exception as e1:
+            # (ب) أمر عادي (احتياطاً)
+            try:
+                self.ex.cancel_order(oid, pos.symbol)
+                journal("stop_cancelled", symbol=pos.symbol, order_id=oid, via="order")
+                return True
+            except Exception:
+                journal("stop_cancel_failed", symbol=pos.symbol, order_id=oid,
+                        reason=str(e1)[:120])
+                return False
 
     def _place_stop(self, pos: Position):
         close_side = "sell" if pos.side == "LONG" else "buy"
@@ -381,10 +408,7 @@ class BinanceExecutor(BaseExecutor):
         old_id = pos.stop_order_id
         try:
             if old_id:
-                try:
-                    self.ex.cancel_order(old_id, symbol)
-                except Exception:
-                    pass
+                self._cancel_stop(pos)
             stop = self._place_stop(Position(**{**asdict(pos), "sl": sl}))
             pos.sl, pos.stop_order_id = sl, str(stop.get("id", ""))
             journal("trail", symbol=symbol, side=pos.side, price=sl, reason=f"ستوب متتبّع → {sl}")
@@ -404,10 +428,7 @@ class BinanceExecutor(BaseExecutor):
             return True
         try:
             if pos.stop_order_id:
-                try:
-                    self.ex.cancel_order(pos.stop_order_id, symbol)
-                except Exception:
-                    pass
+                self._cancel_stop(pos)
             side = "sell" if pos.side == "LONG" else "buy"
             self.ex.create_order(symbol, "market", side, pos.qty,
                                  params={"reduceOnly": True,
