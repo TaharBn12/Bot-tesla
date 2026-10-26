@@ -141,7 +141,8 @@ class HotScanner:
         return math.log10(qv + 10) * (1.0 + pct / 3.0)
 
     # ─────────────────────────────── دورة ───────────────────────────────
-    async def cycle(self) -> dict:
+    async def cycle(self, source: str = "background") -> dict:
+        log.info("بدء دورة (%s)", source)
         async with self._lock:
             t0 = time.time()
             syms = await self.universe()
@@ -253,7 +254,7 @@ class HotScanner:
             }
 
     async def scan_now(self) -> dict:
-        return await self.cycle()
+        return await self.cycle(source="زر/يدوي")
 
     async def run_forever(self):
         await asyncio.sleep(5)          # لا نزاحم بدء التشغيل
@@ -262,7 +263,9 @@ class HotScanner:
                 await self.cycle()
             except Exception as e:
                 log.exception("خطأ في الماسح: %s", e)
-            await asyncio.sleep(int(getattr(self.s, "hotscan_interval", 120)))
+            wait = int(getattr(self.s, "hotscan_interval", 120))
+            log.info("انتظار %ds قبل الدورة التالية", wait)
+            await asyncio.sleep(wait)
 
     # ─────────────────────────────── العرض ───────────────────────────────
     def take_fresh(self, limit: int = 8) -> list:
