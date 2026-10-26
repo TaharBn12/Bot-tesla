@@ -100,6 +100,35 @@ jobs:
           echo "✅ الخدمة: $SVC"
           echo "svc=$SVC" >> "$GITHUB_OUTPUT"
 
+      # ════════════ مزامنة متغيّرات البيئة إلى Railway ════════════
+      # بدونها ينهار البوت فور التشغيل (لا توكن = لا يعمل)
+      - name: مزامنة متغيّرات البيئة
+        if: steps.prep.outputs.mode == 'project' && steps.svc.outputs.svc != ''
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ALLOWED: ${{ secrets.ALLOWED_CHAT_IDS }}
+          EXCH: ${{ secrets.EXCHANGE_NAME }}
+          SVC: ${{ steps.svc.outputs.svc }}
+        run: |
+          export RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
+          if [ -z "$TG_TOKEN" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN غير مضاف في GitHub — لن يُضاف للبوت على Railway وسينهار."
+            exit 0
+          fi
+          CHAT="${TG_CHAT:-5265226396}"
+          ALLOW="${ALLOWED:-$CHAT}"
+          echo "── ضبط المتغيّرات على خدمة: $SVC ──"
+          railway variables --service "$SVC" \
+            --set "TELEGRAM_BOT_TOKEN=$(printf '%s' "$TG_TOKEN" | tr -d '[:space:]')" \
+            --set "TELEGRAM_CHAT_ID=$CHAT" \
+            --set "ALLOWED_CHAT_IDS=$ALLOW" \
+            --set "EXCHANGE=${EXCH:-okx}" \
+            --set "PYTHONUNBUFFERED=1" \
+            --set "TZ=Africa/Algiers" 2>&1 | tail -5
+          echo "✅ المتغيّرات مضبوطة"
+
       # ════════════ النشر (رمز المشروع) ════════════
       - name: النشر برمز المشروع
         if: steps.prep.outputs.mode == 'project'
