@@ -50,5 +50,6 @@ if __name__ == "__main__":
         print("", end="")
         sys.exit(1)
     kind, path = sys.argv[1], sys.argv[2]
-    field = "name" if kind == "services" else "id"
+    fields = {"services": "name", "status": "status", "deployment": "status"}
+    field = fields.get(kind, "id")
     print(pick(path, field), end="")

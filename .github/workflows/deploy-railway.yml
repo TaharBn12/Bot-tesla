@@ -182,6 +182,38 @@ jobs:
           railway up --ci -p "$PID" -e "$ENV_NAME" -s "$SVC" 2>&1 | tee /tmp/deploy.log
           echo "✅ اكتمل النشر بلا أخطاء"
 
+      # ════════════ التحقق من أن النشر يعمل فعلاً ════════════
+      - name: التحقق من حالة النشر
+        id: verify
+        if: steps.prep.outputs.mode == 'project' && steps.svc.outputs.svc != ''
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SVC: ${{ steps.svc.outputs.svc }}
+        run: |
+          export RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
+          sleep 20
+          echo "── آخر النشرات ──"
+          railway deployment list -s "$SVC" --json > /tmp/dep.json 2>/dev/null || true
+          head -c 1200 /tmp/dep.json 2>/dev/null; echo
+          railway deployment list -s "$SVC" 2>&1 | head -10 || true
+
+          STATUS=$(python3 scripts/railway_discover.py status /tmp/dep.json 2>/dev/null || true)
+          echo "الحالة المكتشفة: ${STATUS:-غير معروفة}"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+
+          case "$STATUS" in
+            *FAILED*|*CRASHED*)
+              echo "::warning::النشر فشل — البوت على الأرجح ينهار لنقص المتغيّرات أو خطأ في البناء."
+              ;;
+            *STOPPED*|*REMOVED*|"")
+              echo "::warning::الخدمة متوقفة — محاولة تشغيلها"
+              railway redeploy -s "$SVC" -y 2>&1 | tail -5 || true
+              ;;
+            *)
+              echo "✅ النشر في حالة تشغيل: $STATUS"
+              ;;
+          esac
+
       # ════════════ الملخص ════════════
       - name: ملخص النتيجة
         if: always()
@@ -193,7 +225,7 @@ jobs:
             if [ "$MODE" = "none" ]; then
               echo "⏭️ **تم التجاوز** — لا يوجد أي رمز Railway."
             elif [ "${{ job.status }}" = "success" ]; then
-              echo "✅ **نجح النشر** — الوضع: \`$MODE\` · الخدمة: \`${{ steps.svc.outputs.svc }}\`"
+              echo "✅ **نجح الرفع** — الخدمة: \`${{ steps.svc.outputs.svc }}\` · الحالة: \`${{ steps.verify.outputs.status }}\`"
               echo ""
               echo "> هذه المرة الفشل الحقيقي لا يُخفى: \`pipefail\` مفعّل."
             else
