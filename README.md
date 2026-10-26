@@ -1,6 +1,7 @@
 # بوت إشارات فيوتشرز — TrendPulse v1
 
-[![CI](https://github.com/TaharBn12/Bot-tesla/actions/workflows/ci.yml/badge.svg)](https://github.com/TaharBn12/Bot-tesla/actions/workflows/ci.yml) 
+[![CI](https://github.com/TaharBn12/Bot-tesla/actions/workflows/ci.yml/badge.svg)](https://github.com/TaharBn12/Bot-tesla/actions/workflows/ci.yml)
+[![فحص الصحة](https://github.com/TaharBn12/Bot-tesla/actions/workflows/healthcheck.yml/badge.svg)](https://github.com/TaharBn12/Bot-tesla/actions/workflows/healthcheck.yml) 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)]() [![Exchange](https://img.shields.io/badge/exchange-Binance%20Futures-yellow)]() [![Status](https://img.shields.io/badge/status-testnet--ready-green)]()
 
 بوت تلجرام لإشارات العقود الآجلة + تنفيذ آلي اختياري، باستراتيجية **TrendPulse v1** مُختبَرة على 3.6 سنة بيانات حقيقية.
@@ -213,7 +214,46 @@ python src/preview_signal.py         # معاينة شكل رسالة الإشا
 
 ---
 
-## 7.b) الفحص التلقائي (CI)
+## 7.b) الأتمتة على GitHub — ثلاثة workflows
+
+| Workflow | متى يعمل | ماذا يفعل |
+|---|---|---|
+| **`ci.yml`** | كل دفعة / طلب سحب | ترجمة الكود • استيراد الوحدات • **49 اختبار تنفيذ** • منع تسريب الأسرار |
+| **`healthcheck.yml`** | **كل ساعة** (cron) | يفحص: التوكن • **تراكم الأوامر** (البوت متوقف؟) • وصول البورصة • الإعدادات — ويُنبّهك على تلجرام عند أي مشكلة |
+| **`deploy-railway.yml`** | دفعة تغيّر `src/` أو `Dockerfile` | ينشر على Railway تلقائياً (يُتجاوز بهدوء إن لم يُضف `RAILWAY_TOKEN`) |
+
+### الأسرار المطلوبة في GitHub (Settings → Secrets → Actions)
+| الاسم | إلزامي | الغرض |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | للفحص الدوري | يتحقق من البوت ويُرسل التنبيهات |
+| `TELEGRAM_CHAT_ID` | للفحص الدوري | وجهة التنبيه |
+| `RAILWAY_TOKEN` | للنشر التلقائي | Project Token من Railway |
+
+> **متى يعمل الفحص الدوري حقاً؟** فحص الساعة يكشف أن البوت **توقّف عن قراءة الرسائل** عبر `pending_update_count`.
+> لكنه لا يستطيع *إعادة تشغيله* — الاستضافة (Railway/Fly) هي من تعيد التشغيل. الفحص يُنبّهك فقط.
+
+### اختبار الصحة يدوياً
+```bash
+python src/healthcheck.py            # فحص
+python src/healthcheck.py --notify   # فحص + تنبيه تلجرام عند مشكلة
+```
+
+## 7.c) التحقق من Testnet قبل أي مال حقيقي
+```bash
+python src/testnet_check.py                 # فحص شامل (قراءة فقط)
+python src/testnet_check.py --place-order   # يفتح صفقة صغيرة ويغلقها فوراً
+```
+يفحص: صحة مفاتيح Testnet • **وضع المركز One-way** • الرصيد • دقة السعر/الكمية •
+دعم `closePosition` و`reduceOnly` • **ويرفض العمل إن كان `ALLOW_LIVE=true`** (حماية من الشبكة الحقيقية).
+
+## 7.d) تفعيل Testnet — الخطوات
+1. مفاتيح من https://testnet.binancefuture.com → API Key
+2. ضعها في `.env`: `EXCHANGE_API_KEY` و`EXCHANGE_API_SECRET` (واترك `ALLOW_LIVE` فارغاً)
+3. `python src/testnet_check.py --place-order` ← يجب أن تنجح كل الفحوصات
+4. في `config.yaml`: `mode: autotrade` و `dry_run: false`
+5. `python src/bot.py` — وراقب `data/journal.jsonl`
+
+## 7.e) الفحص التلقائي (CI)
 
 كل دفعة إلى `main` تُشغّل تلقائياً (`.github/workflows/ci.yml`):
 

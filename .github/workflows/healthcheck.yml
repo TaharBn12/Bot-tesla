@@ -1,0 +1,78 @@
+name: فحص صحة البوت
+
+# كل ساعة — يكشف توقف البوت أو تراكم الأوامر أو حجب البورصة
+on:
+  schedule:
+    - cron: "0 * * * *"      # كل ساعة (توقيت UTC)
+  workflow_dispatch:
+    inputs:
+      notify:
+        description: "إرسال تنبيه إلى تلجرام عند وجود مشكلة"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: healthcheck
+  cancel-in-progress: true
+
+jobs:
+  health:
+    name: فحص الحالة
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: تثبيت الحد الأدنى
+        run: pip install --quiet pyyaml
+
+      - name: تشغيل الفحص
+        id: check
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set +e
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::warning::TELEGRAM_BOT_TOKEN غير مضاف — الفحص محدود"
+          fi
+          python src/healthcheck.py --notify 2>&1 | tee /tmp/health.log
+          CODE=${PIPESTATUS[0]}
+          echo "code=$CODE" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: ملخص النتيجة
+        if: always()
+        run: |
+          {
+            echo "## 🩺 فحص صحة البوت"
+            echo ""
+            echo '```'
+            cat /tmp/health.log 2>/dev/null || echo "لا سجل"
+            echo '```'
+            echo ""
+            if [ "${{ steps.check.outputs.code }}" = "0" ]; then
+              echo "✅ **كل الفحوصات سليمة**"
+            else
+              echo "⚠️ **وُجدت مشكلة** — أُرسل تنبيه إلى تلجرام إن كان التوكن مضافاً."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # تنبيه تلقائي عند الفشل حتى لو لم يُضف التوكن في الخطوة السابقة
+      - name: تنبيه تلجرام عند المشكلة
+        if: steps.check.outputs.code != '0' && env.TOKEN != ''
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT}" \
+            --data-urlencode "text=🩺 فحص الصحة وجد مشكلة في البوت — التفاصيل في GitHub Actions" \
+            || true

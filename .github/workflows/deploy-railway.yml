@@ -1,0 +1,98 @@
+name: نشر تلقائي على Railway
+
+# يعمل عند كل دفعة تغيّر الكود، أو يدوياً من صفحة Actions
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "config.yaml"
+      - "railway.json"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "سبب النشر"
+        required: false
+        default: "نشر يدوي"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-railway
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: نشر إلى Railway
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── إن لم تُضف RAILWAY_TOKEN يُتجاوز النشر بهدوء بدل إظهار فشل أحمر ──
+      - name: التحقق من وجود مفتاح Railway
+        id: guard
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          if [ -z "$RAILWAY_TOKEN" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::لم يُضف RAILWAY_TOKEN — تم تجاوز النشر. أضفه من Settings → Secrets → Actions"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "✅ مفتاح Railway موجود"
+          fi
+
+      - name: تثبيت Railway CLI
+        if: steps.guard.outputs.skip == 'false'
+        run: npm install -g @railway/cli
+
+      - name: التحقق من الاتصال بالمشروع
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: railway status
+
+      - name: النشر
+        id: push
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          echo "── بدء النشر ──"
+          railway up --ci 2>&1 | tee /tmp/deploy.log
+          echo "── انتهى النشر ──"
+
+      - name: ملخص النتيجة
+        if: always()
+        run: |
+          {
+            echo "## 🚀 نتيجة النشر"
+            echo ""
+            if [ "${{ steps.guard.outputs.skip }}" = "true" ]; then
+              echo "⏭️ **تم التجاوز** — لم يُضف \`RAILWAY_TOKEN\`."
+              echo ""
+              echo "أضفه من: Settings → Secrets and variables → Actions → New repository secret"
+            elif [ "${{ steps.push.outcome }}" = "success" ]; then
+              echo "✅ **نجح النشر** — البوت يُعاد تشغيله على Railway تلقائياً."
+            else
+              echo "❌ **فشل النشر** — راجع السجل أعلاه."
+            fi
+            echo ""
+            echo "**الالتزام:** \`${{ github.sha }}\`"
+            echo "**المشغّل:** ${{ github.actor }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: تنبيه عند فشل النشر
+        if: failure() && env.TOKEN != ''
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d "chat_id=${CHAT}" \
+            -d "text=❌ فشل النشر على Railway — راجع GitHub Actions" \
+            -d "parse_mode=HTML" || true
