@@ -18,6 +18,10 @@ on:
         description: "سبب النشر"
         required: false
         default: "نشر يدوي"
+      service:
+        description: "اسم خدمة Railway (يتجاوز السر RAILWAY_SERVICE)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -74,7 +78,7 @@ jobs:
         if: steps.prep.outputs.mode == 'project'
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          SERVICE_SECRET: ${{ secrets.RAILWAY_SERVICE }}
+          SERVICE_SECRET: ${{ inputs.service || secrets.RAILWAY_SERVICE }}
           ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
         run: |
           export RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
