@@ -13,6 +13,7 @@ from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
 from config import Settings
 from engine import Scanner
 from executor import BinanceExecutor, PaperExecutor, TrailingManager, journal
+from hotscan import HotScanner
 from risk import KillSwitch
 from strategy import Signal
 import tracker
@@ -27,6 +28,7 @@ STRATEGY_NAME = None   # من config.yaml
 scanner: Scanner | None = None
 executor = None            # BinanceExecutor أو PaperExecutor (حسب الوضع)
 trailer: TrailingManager | None = None
+hotscanner: HotScanner | None = None
 
 # ═══ الموافقة اليدوية: كل صفقة رسالة مستقلة بزر تنفيذ ═══
 PENDING: dict[str, dict] = {}      # token → {sig, exp, chat, msg_id}
@@ -274,7 +276,8 @@ async def on_approval(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 # ═══════════════ لوحة الأزرار ═══════════════
 MENU = ReplyKeyboardMarkup(
-    [["📈 صفقات ممكنة", "🎯 أقرب الفرص"],
+    [["🔍 فحص السوق", "📈 صفقات ممكنة"],
+     ["🎯 أقرب الفرص"],
      ["📊 حالة السوق", "📉 حالة البوت"],
      ["📋 نتائج الإشارات", "❓ مساعدة"]],
     resize_keyboard=True, is_persistent=True,
@@ -282,6 +285,21 @@ MENU = ReplyKeyboardMarkup(
 
 
 _OPP_CACHE: dict = {"t": 0.0, "data": None, "scanned": 0}
+
+
+def _split(text: str, limit: int = 3800) -> list[str]:
+    """يقسّم نصاً طويلاً على حدود الأسطر (تلغرام يرفض أكثر من 4096 حرفاً)."""
+    if len(text) <= limit:
+        return [text]
+    parts, cur = [], ""
+    for ln in text.split("\n"):
+        if len(cur) + len(ln) + 1 > limit:
+            parts.append(cur); cur = ln
+        else:
+            cur = f"{cur}\n{ln}" if cur else ln
+    if cur:
+        parts.append(cur)
+    return parts
 
 
 async def cmd_menu(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -299,41 +317,76 @@ async def cmd_ping(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 @safe
-async def btn_opportunities(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    """الزر الأهم: الصفقات الممكنة الدخول فيها الآن."""
-    import time
-    # رد فوري حتى لا يبدو البوت معلقاً
-    msg = await u.message.reply_text("⏳ أفحص السوق الآن… (ثوانٍ قليلة)")
-
-    # نتيجة محفوظة حديثاً؟ استخدمها فوراً
-    if _OPP_CACHE["data"] is not None and time.time() - _OPP_CACHE["t"] < 45:
-        opps, scanned = _OPP_CACHE["data"], _OPP_CACHE["scanned"]
-        note = "\n<i>(نتيجة محفوظة قبل أقل من دقيقة — اضغط مرة أخرى بعد قليل للتحديث)</i>"
-    else:
-        try:
-            opps = await asyncio.wait_for(
-                scanner.opportunities(min_readiness=66.0, limit=6), timeout=90)
-            scanned = len(scanner._symbols)
-            _OPP_CACHE.update({"t": time.time(), "data": opps, "scanned": scanned})
-            note = ""
-        except asyncio.TimeoutError:
-            await msg.edit_text("⌛ الفحص أخذ وقتاً أطول من المتوقع (تحميل البورصة). جرّب مرة أخرى.")
-            return
-        except Exception as e:
-            log.exception("فرص: %s", e)
-            await msg.edit_text(
-                f"⚠️ تعذّر الفحص: <code>{esc(type(e).__name__)}</code>\n{esc(str(e)[:150])}",
-                parse_mode=ParseMode.HTML)
-            return
-
-    mood = opp_mod.market_mood(opps)
-    text = fmt_opportunities(opps, mood, settings, scanned=scanned) + note
+async def cmd_hotscan(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """🔍 فحص السوق — يمسح كل عقود الفيوتشرز ويعيد «تم»."""
+    if hotscanner is None:
+        return await u.message.reply_text("الماسح غير مهيّأ — أعد تشغيل البوت.")
+    msg = await u.message.reply_text("⏳ <b>بدأ الفحص</b>\nأمسح كل عقود الفيوتشرز…",
+                                    parse_mode=ParseMode.HTML)
     try:
-        # ملاحظة: edit_text لا يقبل لوحة أزرار عادية — نعدّل النص فقط
-        await msg.edit_text(text, parse_mode=ParseMode.HTML)
-    except Exception:
-        # إن فشل التعديل (نص طويل/قديم) نرسل رسالة جديدة
-        await u.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=MENU)
+        r = await asyncio.wait_for(hotscanner.scan_now(), timeout=300)
+    except asyncio.TimeoutError:
+        return await msg.edit_text("⌛ الفحص تجاوز 5 دقائق — جرّب بعد قليل.")
+    except Exception as e:
+        log.exception("فحص السوق: %s", e)
+        return await msg.edit_text(f"⚠️ تعذّر الفحص: <code>{esc(str(e)[:160])}</code>",
+                                   parse_mode=ParseMode.HTML)
+    st = hotscanner.summary()
+    fresh = st.get("fresh_count", 0)
+    lines = [
+        "✅ <b>تم الفحص</b>",
+        "──────────────",
+        f"فُحص الآن: <b>{r.get('batch', 0)}</b> زوجاً في {r.get('seconds', 0)} ثانية",
+        f"إجمالي عقود الفيوتشرز: <b>{st.get('symbols_total', 0)}</b>",
+        f"دُرِس حتى الآن: <b>{st.get('symbols_studied', 0)}</b> زوجاً",
+        f"صفقات جديدة: <b>{fresh}</b>" + ("  ← اضغط «📈 صفقات ممكنة»" if fresh else ""),
+        "",
+        "<i>الماسح يعمل في الخلفية كل دقيقتين: الأكثر ضجة + شريحة جديدة من بقية السوق.</i>",
+    ]
+    await msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+@safe
+async def btn_opportunities(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """📈 صفقات ممكنة — الجديدة فقط، لا تتكرر."""
+    if hotscanner is None:
+        return await u.message.reply_text("الماسح غير مهيّأ — أعد تشغيل البوت.")
+    st0 = hotscanner.summary()
+    if not st0.get("cycles"):
+        msg = await u.message.reply_text("⏳ أول فحص للسوق… انتظر قليلاً")
+        try:
+            await asyncio.wait_for(hotscanner.scan_now(), timeout=300)
+        except Exception as e:
+            return await msg.edit_text(f"⚠️ تعذّر الفحص: <code>{esc(str(e)[:150])}</code>",
+                                       parse_mode=ParseMode.HTML)
+    opps = hotscanner.take_fresh(6)
+    st = hotscanner.summary()
+    if not opps:
+        last = st.get("last_cycle_at") or 0
+        when = time.strftime("%H:%M", time.localtime(last)) if last else "—"
+        return await u.message.reply_text(
+            "🆕 <b>لا صفقات جديدة</b>\n──────────────\n"
+            "كل ما وُجد عُرض عليك سابقاً ولم تُغلق شمعة جديدة.\n"
+            f"آخر فحص: <b>{when}</b> | دُرِس <b>{st.get('symbols_studied', 0)}</b> "
+            f"من <b>{st.get('symbols_total', 0)}</b> زوجاً\n\n"
+            "<i>اضغط «🔍 فحص السوق» لفحص فوري.</i>", parse_mode=ParseMode.HTML)
+    mood = opp_mod.market_mood(opps)
+    head = (f"🆕 <b>صفقات جديدة</b> — لم تُعرض سابقاً\n"
+            f"<i>دُرِس {st.get('symbols_studied', 0)} من {st.get('symbols_total', 0)} زوجاً "
+            f"· الدورة {st.get('last_cycle_sec', 0)}s</i>\n\n")
+    text = head + fmt_opportunities(opps, mood, settings, scanned=st.get("last_batch", 0))
+    ok = False
+    for chunk in _split(text, 3800):
+        try:
+            await u.message.reply_text(chunk, parse_mode=ParseMode.HTML, reply_markup=MENU)
+            ok = True
+        except Exception:
+            try:
+                await u.message.reply_text(chunk, reply_markup=MENU); ok = True
+            except Exception as e2:
+                log.warning("تعذّر الإرسال: %s", e2)
+    if not ok:
+        await u.message.reply_text("⚠️ تعذّر الإرسال — جرّب مرة أخرى.")
 
 
 async def btn_market(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -355,6 +408,7 @@ async def menu_router(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     # 1) مطابقة دقيقة لعناوين الأزرار أولاً (يمنع تداخل «أقرب الفرص» مع «صفقات ممكنة»)
     exact = {
+        "فحص السوق": cmd_hotscan,
         "صفقات ممكنة": btn_opportunities,
         "اقرب الفرص": cmd_near,
         "حالة السوق": btn_market,
@@ -370,6 +424,7 @@ async def menu_router(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # 2) ثم الكلمات المفتاحية — الأكثر تخصيصاً أولاً
     rules = [
         (("اقرب", "قرب", "near", "جاهز"), cmd_near),
+        (("فحص السوق", "فحص", "امسح", "hotscan"), cmd_hotscan),
         (("صفقات", "فرص", "opportun", "توصيات", "دخول"), btn_opportunities),
         (("سوق", "brief", "ملخص", "ميل"), btn_market),
         (("حالة البوت", "status", "احصائ", "إحصائ", "stats2"), cmd_status),
@@ -584,6 +639,9 @@ async def post_init(application: Application):
             log.warning("تعذّر إرسال تنبيه البدء: %s", e)
         STARTUP_WARNING = None
     asyncio.create_task(scanner.run_forever())
+    if hotscanner is not None:
+        asyncio.create_task(hotscanner.run_forever())
+        log.info("بدأ الماسح في الخلفية")
     asyncio.create_task(tracker_loop())
     if trailer is not None:
         asyncio.create_task(trailer.run_forever())
@@ -598,8 +656,10 @@ def main():
     global app, scanner
     if not settings.bot_token:
         raise SystemExit("ضع TELEGRAM_BOT_TOKEN في ملف .env")
-    global executor, trailer
+    global executor, trailer, hotscanner
     scanner = Scanner(settings, STRATEGY_NAME, send_signal)
+    hotscanner = HotScanner(settings, scanner.feed, scanner.strategy)
+    log.info("ماسح السوق الكامل جاهز — %s", scanner.s.exchange)
     if settings.mode in ("autotrade", "approve"):
         kill = KillSwitch(settings.max_daily_loss_pct, settings.max_trades_per_day,
                           settings.max_consecutive_losses)
@@ -628,7 +688,7 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("scan", cmd_hotscan))
     app.add_handler(CommandHandler("symbols", cmd_symbols))
     app.add_handler(CommandHandler("positions", cmd_positions))
     app.add_handler(CommandHandler("close", cmd_close))

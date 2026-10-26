@@ -37,6 +37,13 @@ class Settings:
     max_consecutive_losses: int = 4
     api_key: str = ""
     api_secret: str = ""
+    # ---- ماسح السوق الكامل (الخلفية) ----
+    hotscan_interval: int = 120        # كل كم ثانية دورة في الخلفية
+    hot_batch_size: int = 60           # الأكثر ضجة يُفحص كل دورة
+    hot_rotate_size: int = 40          # شريحة متغيّرة من بقية السوق كل دورة
+    hot_concurrency: int = 8           # توازي جلب الشموع
+    hot_min_readiness: float = 60.0    # أقل جاهزية تُعدّ فرصة
+    heat_min_volume: float = 1_000_000 # أدنى حجم تداول بالدولار
 
     @classmethod
     def load(cls) -> "Settings":
@@ -50,7 +57,9 @@ class Settings:
                   "max_signals_per_scan", "max_open_positions", "signal_expiry_hours", "universe_size",
                   "dry_run", "paper_balance", "trail_atr", "max_daily_loss_pct",
                   "max_trades_per_day", "max_consecutive_losses", "symbols", "leverage", "strategy", "strategy_params",
-                  "risk_per_trade_pct", "mode"):
+                  "risk_per_trade_pct", "mode", "hotscan_interval", "hot_batch_size",
+                  "hot_rotate_size", "hot_concurrency", "hot_min_readiness",
+                  "heat_min_volume"):
             if k in raw and raw[k] is not None:
                 setattr(s, k, raw[k])
         if os.getenv("EXCHANGE"):        # تجاوز سريع للاختبار

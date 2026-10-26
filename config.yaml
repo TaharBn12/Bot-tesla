@@ -34,3 +34,11 @@ trail_atr: 3.5             # مضاعف ATR للستوب المتتبّع
 max_daily_loss_pct: 3.0
 max_trades_per_day: 6
 max_consecutive_losses: 4
+
+# ---- ماسح السوق الكامل (يعمل في الخلفية طوال حياة البوت) ----
+hotscan_interval: 120      # كل دقيقتين دورة كاملة
+hot_batch_size: 60         # الأكثر ضجة يُفحص كل دورة
+hot_rotate_size: 40        # بقية السوق تُفحص بالدوران (تغطية كل العملات مع الوقت)
+hot_concurrency: 8         # عدد الجلب المتوازي
+hot_min_readiness: 60      # أقل جاهزية تُعدّ فرصة
+heat_min_volume: 1000000   # أدنى حجم تداول بالدولار ليدخل الترتيب
