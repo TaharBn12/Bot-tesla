@@ -1,0 +1,115 @@
+name: CI
+
+# يعمل عند كل دفعة إلى main وعند كل طلب سحب
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ══════════════════════════════════════════════════
+  # 1) فحص الكود وتشغيل الاختبارات (بلا إنترنت ولا مفاتيح)
+  # ══════════════════════════════════════════════════
+  test:
+    name: اختبارات الكود
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: تجهيز بايثون
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: تثبيت الاعتماديات
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: فحص الصياغة (كل الملفات تُترجم)
+        run: |
+          echo "── فحص py_compile ──"
+          python -m compileall -q src/ && echo "✅ كل ملفات src سليمة"
+
+      - name: استيراد الوحدات
+        run: |
+          cd src
+          python -c "
+          import config, datafeed, strategy, engine, risk, executor, tracker, opportunities, formatting
+          print('✅ كل الوحدات تُستورد بنجاح')
+          "
+
+      - name: اختبارات التنفيذ الآلي (49 اختباراً)
+        run: python src/tests_executor.py
+
+      - name: توليد منحنى رأس المال (فحص الاستراتيجية)
+        run: python src/preview_signal.py
+
+      - name: إعدادات الاستراتيجية المعتمدة
+        run: |
+          python -c "
+          import sys; sys.path.insert(0, 'src')
+          from strategy import TrendPulse, STRATEGIES
+          s = TrendPulse({})
+          assert s.er_min == 0.25, f'er_min غير صحيح: {s.er_min}'
+          assert s.adx_min == 20, f'adx_min غير صحيح: {s.adx_min}'
+          assert 'trend_pulse' in STRATEGIES
+          print('✅ معاملات TrendPulse المعتمدة سليمة')
+          "
+
+  # ══════════════════════════════════════════════════
+  # 2) فحص أمني: منع رفع الأسرار
+  # ══════════════════════════════════════════════════
+  security:
+    name: فحص الأسرار
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: لا يوجد ملف .env مُتتبَّع
+        run: |
+          if git ls-files | grep -qx ".env"; then
+            echo "⛔ خطأ: ملف .env مُتتبَّع في المستودع!"
+            echo "الحل: git rm --cached .env && echo '.env' >> .gitignore"
+            exit 1
+          fi
+          echo "✅ لا يوجد .env مُتتبَّع"
+
+      - name: لا توجد رموز أو مفاتيح مكتوبة في الكود
+        run: |
+          set +e
+          # أنماط الرموز الشائعة: GitHub PAT / توكن تلجرام / مفاتيح عامة
+          PATTERNS='ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}|[0-9]{8,10}:[A-Za-z0-9_-]{33,}|AKIA[0-9A-Z]{16}'
+          HITS=$(git grep -nEI "$PATTERNS" -- . ':!*.md' ':!.github/*' 2>/dev/null)
+          if [ -n "$HITS" ]; then
+            echo "⛔ خطأ: وُجدت أسرار محتملة في الملفات:"
+            echo "$HITS"
+            exit 1
+          fi
+          echo "✅ لا توجد رموز أو مفاتيح في الكود"
+
+      - name: ملف الأسرار النموذجي موجود
+        run: |
+          test -f .env.example || { echo "⛔ .env.example مفقود"; exit 1; }
+          echo "✅ .env.example موجود (القالب بلا قيم)"
+
+      - name: فحص أن .gitignore يستبعد الأسرار
+        run: |
+          for pattern in ".env" "data/cache/" "__pycache__/"; do
+            grep -qF "$pattern" .gitignore || { echo "⛔ .gitignore لا يستبعد: $pattern"; exit 1; }
+          done
+          echo "✅ .gitignore يستبعد الأسرار وملفات الكاش"

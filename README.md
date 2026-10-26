@@ -1,5 +1,6 @@
 # بوت إشارات فيوتشرز — TrendPulse v1
 
+[![CI](https://github.com/TaharBn12/Bot-tesla/actions/workflows/ci.yml/badge.svg)](https://github.com/TaharBn12/Bot-tesla/actions/workflows/ci.yml) 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)]() [![Exchange](https://img.shields.io/badge/exchange-Binance%20Futures-yellow)]() [![Status](https://img.shields.io/badge/status-testnet--ready-green)]()
 
 بوت تلجرام لإشارات العقود الآجلة + تنفيذ آلي اختياري، باستراتيجية **TrendPulse v1** مُختبَرة على 3.6 سنة بيانات حقيقية.
@@ -211,6 +212,17 @@ python src/preview_signal.py         # معاينة شكل رسالة الإشا
 4. وضع Testnet أولاً (`binanceusdm` + `set_sandbox_mode`) قبل أي مال حقيقي.
 
 ---
+
+## 7.b) الفحص التلقائي (CI)
+
+كل دفعة إلى `main` تُشغّل تلقائياً (`.github/workflows/ci.yml`):
+
+| الوظيفة | ما تفحصه |
+|---|---|
+| **اختبارات الكود** | ترجمة كل الملفات • استيراد الوحدات • **49 اختبار تنفيذ** • معاملات الاستراتيجية |
+| **فحص الأسرار** | منع تتبّع `.env` • منع رموز GitHub/تلجرام في الكود • التحقق من `.gitignore` |
+
+راجع النتائج: https://github.com/TaharBn12/Bot-tesla/actions
 
 ## 8) المرحلة الثانية: التنفيذ الآلي ✅
 
