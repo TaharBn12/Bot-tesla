@@ -82,22 +82,19 @@ jobs:
           echo "env=$ENV_NAME" >> "$GITHUB_OUTPUT"
 
           SVC="$SERVICE_SECRET"
+
+          # ⛔ لا اختيار تلقائي أبداً: الرفع إلى خدمة خاطئة يفسد تطبيقاً آخر
           if [ -z "$SVC" ]; then
-            echo "── خدمات المشروع ──"
-            if ! railway service list --json > /tmp/svc.json 2>/tmp/svc.err; then
-              railway service list -e "$ENV_NAME" --json > /tmp/svc.json 2>>/tmp/svc.err || true
-            fi
-            cat /tmp/svc.err 2>/dev/null | head -5 || true
-            cat /tmp/svc.json 2>/dev/null | head -40 || true
-            railway service list 2>&1 | head -20 || true
-            SVC=$(python3 scripts/railway_discover.py services /tmp/svc.json 2>/dev/null || true)
+            echo "── الخدمات الموجودة في المشروع (للعلم فقط) ──"
+            railway service list 2>&1 | head -15 || true
+            echo ""
+            echo "::warning::RAILWAY_SERVICE غير مضاف — تم إلغاء النشر لحماية خدماتك الأخرى."
+            echo "::warning::أضف السر RAILWAY_SERVICE باسم خدمة البوت، أو اربط المستودع بـ Railway من لوحة التحكم."
+            echo "svc=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          if [ -z "$SVC" ]; then
-            echo "::error::المشروع فيه أكثر من خدمة. أضف السر RAILWAY_SERVICE باسم الخدمة الصحيحة (من القائمة أعلاه)."
-            exit 1
-          fi
-          echo "✅ الخدمة: $SVC"
+          echo "✅ الخدمة المحددة: $SVC"
           echo "svc=$SVC" >> "$GITHUB_OUTPUT"
 
       # ════════════ مزامنة متغيّرات البيئة إلى Railway ════════════
@@ -131,7 +128,7 @@ jobs:
 
       # ════════════ النشر (رمز المشروع) ════════════
       - name: النشر برمز المشروع
-        if: steps.prep.outputs.mode == 'project'
+        if: steps.prep.outputs.mode == 'project' && steps.svc.outputs.svc != ''
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           SVC: ${{ steps.svc.outputs.svc }}
