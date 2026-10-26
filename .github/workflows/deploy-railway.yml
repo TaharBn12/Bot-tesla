@@ -203,7 +203,19 @@ jobs:
 
           case "$STATUS" in
             *FAILED*|*CRASHED*)
-              echo "::warning::النشر فشل — البوت على الأرجح ينهار لنقص المتغيّرات أو خطأ في البناء."
+              echo "::warning::النشر فشل — جلب سجل البناء والتشغيل"
+              {
+                echo "### 🧾 سجل البناء (آخر 60 سطراً)"
+                echo '```'
+                railway logs -s "$SVC" --build --lines 60 2>&1 | tail -60 || echo "تعذر جلب سجل البناء"
+                echo '```'
+                echo "### 🧾 سجل التشغيل (آخر 60 سطراً)"
+                echo '```'
+                railway logs -s "$SVC" --lines 60 2>&1 | tail -60 || echo "تعذر جلب سجل التشغيل"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::فشل النشر — السجل في ملخص التشغيل (Summary)"
+              exit 1
               ;;
             *STOPPED*|*REMOVED*|"")
               echo "::warning::الخدمة متوقفة — محاولة تشغيلها"
