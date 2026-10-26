@@ -24,136 +24,156 @@ concurrency:
   group: deploy-railway
   cancel-in-progress: false
 
+env:
+  # مفتاح الحساب (Account Token) — يُقرأ من الأسرار
+  RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+  # مفتاح المشروع (Project Token) — بديل
+  RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+
 jobs:
   deploy:
     name: نشر إلى Railway
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
-      # ════════════════════════════════════════════════════════
-      # تحديد نوع الرمز تلقائياً:
-      #   RAILWAY_API_TOKEN  = Account/Team Token  (يعمل مع أي مشروع)
-      #   RAILWAY_TOKEN      = Project Token       (مرتبط بمشروع واحد)
-      # ════════════════════════════════════════════════════════
-      - name: تحديد نوع الرمز
-        id: kind
+      - name: تجهيز الرموز
+        id: prep
         env:
-          API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-          PROJ_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-          PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          API_SECRET: ${{ secrets.RAILWAY_API_TOKEN }}
+          PROJ_SECRET: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          # إزالة أي مسافات أو أسطر جديدة عالقة من اللصق
-          API_TOKEN=$(printf '%s' "$API_TOKEN" | tr -d '[:space:]')
-          PROJ_TOKEN=$(printf '%s' "$PROJ_TOKEN" | tr -d '[:space:]')
+          # إزالة المسافات والأسطر العالقة من اللصق
+          API=$(printf '%s' "$API_SECRET" | tr -d '[:space:]')
+          PROJ=$(printf '%s' "$PROJ_SECRET" | tr -d '[:space:]')
+          echo "طول رمز الحساب : ${#API}"
+          echo "طول رمز المشروع: ${#PROJ}"
 
-          echo "طول رمز الحساب : ${#API_TOKEN}"
-          echo "طول رمز المشروع: ${#PROJ_TOKEN}"
-          echo "معرّف المشروع  : ${PROJECT_ID:-غير مضاف}"
-
-          if [ -n "$API_TOKEN" ]; then
+          if [ -n "$API" ]; then
             echo "mode=account" >> "$GITHUB_OUTPUT"
-            echo "✅ سيُستخدم رمز الحساب (RAILWAY_API_TOKEN)"
-            if [ -z "$PROJECT_ID" ]; then
-              echo "skip=1" >> "$GITHUB_OUTPUT"
-              echo "::error::رمز الحساب يحتاج معرّف المشروع. أضف RAILWAY_PROJECT_ID أو استخدم Project Token في RAILWAY_TOKEN."
-              exit 0
-            fi
-            echo "skip=0" >> "$GITHUB_OUTPUT"
-          elif [ -n "$PROJ_TOKEN" ]; then
+            echo "API token = $API" >> "$GITHUB_ENV"
+            echo "::notice::سيُستخدم رمز الحساب (RAILWAY_API_TOKEN)"
+          elif [ -n "$PROJ" ]; then
             echo "mode=project" >> "$GITHUB_OUTPUT"
-            echo "✅ سيُستخدم رمز المشروع (RAILWAY_TOKEN)"
-            echo "skip=0" >> "$GITHUB_OUTPUT"
+            echo "::notice::سيُستخدم رمز المشروع (RAILWAY_TOKEN)"
+            exit 0
           else
             echo "mode=none" >> "$GITHUB_OUTPUT"
-            echo "skip=1" >> "$GITHUB_OUTPUT"
-            echo "::notice::لا يوجد أي رمز Railway — تم تجاوز النشر."
+            echo "::notice::لا يوجد رمز Railway — تجاوز النشر."
           fi
 
       - name: تثبيت Railway CLI
-        if: steps.kind.outputs.skip == '0'
+        if: steps.prep.outputs.mode != 'none'
         run: npm install -g @railway/cli
 
-      # ── رمز المشروع: لا يحتاج ربطاً، يجرّب النشر مباشرة ──
-      - name: النشر (رمز المشروع)
-        id: push_project
-        if: steps.kind.outputs.skip == '0' && steps.kind.outputs.mode == 'project'
+      # ════════════ كشف المشروع والخدمة تلقائياً ════════════
+      - name: كشف المشروع
+        id: find
+        if: steps.prep.outputs.mode == 'account'
         env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-        run: |
-          RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
-          export RAILWAY_TOKEN
-          echo "── محاولة النشر ──"
-          if railway up --ci 2>&1 | tee /tmp/deploy.log; then
-            echo "ok=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=0" >> "$GITHUB_OUTPUT"
-            exit 1
-          fi
-
-      # ── رمز الحساب: يحتاج ربط المشروع أولاً ──
-      - name: ربــط المشروع (رمز الحساب)
-        if: steps.kind.outputs.skip == '0' && steps.kind.outputs.mode == 'account'
-        env:
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+          ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
           SERVICE: ${{ secrets.RAILWAY_SERVICE }}
         run: |
-          export RAILWAY_API_TOKEN=$(printf '%s' "$RAILWAY_API_TOKEN" | tr -d '[:space:]')
-          echo "── التحقق من الرمز ──"
-          railway whoami || true
-          echo "── ربط المشروع ──"
-          if [ -n "$SERVICE" ]; then
-            railway link --project "$PROJECT_ID" --service "$SERVICE"
-          else
-            railway link --project "$PROJECT_ID"
-          fi
-          railway status
+          ENV_NAME="${ENVIRONMENT:-production}"
+          echo "env=$ENV_NAME" >> "$GITHUB_OUTPUT"
+          echo "── الحساب ──"
+          railway whoami 2>&1 | head -3 || true
 
+          PID="$PROJECT_ID"
+          if [ -z "$PID" ]; then
+            echo "── المشاريع المتاحة ──"
+            railway list --json > /tmp/projects.json 2>/dev/null || railway list > /tmp/projects.txt 2>&1
+            if [ -s /tmp/projects.json ]; then
+              cat /tmp/projects.json | head -40
+              PID=$(python3 scripts/railway_discover.py projects /tmp/projects.json)
+              if [ -z "$PID" ]; then
+                echo "::error::يوجد أكثر من مشروع. أضف السر RAILWAY_PROJECT_ID."
+                exit 1
+              fi
+              echo "✅ كُشف المشروع تلقائياً: $PID"
+            else
+              cat /tmp/projects.txt 2>/dev/null | head -20
+              echo "::error::تعذّر كشف المشروع. أضف RAILWAY_PROJECT_ID من Railway → المشروع → Settings."
+              exit 1
+            fi
+          else
+            echo "✅ معرّف المشروع من الأسرار: $PID"
+          fi
+          echo "pid=$PID" >> "$GITHUB_OUTPUT"
+
+          SVC="$SERVICE"
+          if [ -z "$SVC" ]; then
+            echo "── الخدمات في المشروع ──"
+            railway service list -p "$PID" -e "$ENV_NAME" --json > /tmp/svc.json 2>/dev/null || true
+            if [ -s /tmp/svc.json ]; then
+              cat /tmp/svc.json | head -20
+              SVC=$(python3 scripts/railway_discover.py services /tmp/svc.json)
+            fi
+          fi
+          if [ -z "$SVC" ]; then
+            echo "::warning::لم تُحدَّد الخدمة — سيُنشئ Railway خدمة من اسم المستودع."
+            echo "svc=" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ الخدمة: $SVC"
+            echo "svc=$SVC" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ════════════ النشر ════════════
       - name: النشر (رمز الحساب)
-        if: steps.kind.outputs.skip == '0' && steps.kind.outputs.mode == 'account'
+        if: steps.prep.outputs.mode == 'account'
         env:
-          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          PID: ${{ steps.find.outputs.pid }}
+          ENV_NAME: ${{ steps.find.outputs.env }}
+          SVC: ${{ steps.find.outputs.svc }}
         run: |
-          export RAILWAY_API_TOKEN=$(printf '%s' "$RAILWAY_API_TOKEN" | tr -d '[:space:]')
+          echo "── بدء النشر ──"
+          if [ -n "$SVC" ]; then
+            railway up --ci -p "$PID" -e "$ENV_NAME" -s "$SVC" 2>&1 | tee /tmp/deploy.log
+          else
+            railway up --ci -p "$PID" -e "$ENV_NAME" 2>&1 | tee /tmp/deploy.log
+          fi
+
+      - name: النشر (رمز المشروع)
+        if: steps.prep.outputs.mode == 'project'
+        run: |
+          echo "── بدء النشر ──"
           railway up --ci 2>&1 | tee /tmp/deploy.log
 
-      # ════════════════════════════════════════════════════════
+      # ════════════ الملخص ════════════
       - name: ملخص النتيجة
         if: always()
         run: |
           {
             echo "## 🚀 نتيجة النشر على Railway"
             echo ""
-            MODE="${{ steps.kind.outputs.mode }}"
-            SKIP="${{ steps.kind.outputs.skip }}"
-            if [ "$SKIP" = "1" ]; then
-              if [ "$MODE" = "account" ]; then
-                echo "⚠️ **رمز الحساب مضاف لكن ينقصه \`RAILWAY_PROJECT_ID\`.**"
-                echo ""
-                echo "أضفه من: Settings → Secrets → Actions، أو استخدم **Project Token** بدلاً منه."
-              else
-                echo "⏭️ **تم التجاوز** — لم يُضف أي رمز Railway."
-              fi
+            MODE="${{ steps.prep.outputs.mode }}"
+            if [ "$MODE" = "none" ]; then
+              echo "⏭️ **تم التجاوز** — لا يوجد أي رمز Railway."
+              echo ""
+              echo "أضف السر \`RAILWAY_API_TOKEN\` (رمز الحساب) من:"
+              echo "Settings → Secrets and variables → Actions → New repository secret"
             elif [ "${{ job.status }}" = "success" ]; then
               echo "✅ **نجح النشر** — الوضع: \`$MODE\`"
               echo ""
-              echo "البوت على Railway أُعيد بناؤه وتشغيله."
+              echo "| العنصر | القيمة |"
+              echo "|---|---|"
+              echo "| المشروع | \`${{ steps.find.outputs.pid }}\` |"
+              echo "| البيئة | \`${{ steps.find.outputs.env }}\` |"
+              echo "| الخدمة | \`${{ steps.find.outputs.svc }}\` |"
             else
               echo "❌ **فشل النشر** — راجع السجل أعلاه."
               echo ""
-              echo "| الرمز المستخدم | النتيجة |"
+              echo "| السبب المحتمل | الحل |"
               echo "|---|---|"
-              echo "| \`$MODE\` | فشل |"
-              echo ""
-              echo "أشهر سببين:"
-              echo "1. **رمز حساب في خانة رمز المشروع** → استخدم \`RAILWAY_API_TOKEN\` لرمز الحساب."
-              echo "2. **الرمز لا يملك صلاحية على هذا المشروع** → أعد إنشاء Project Token من داخل المشروع."
+              echo "| رمز حساب مضاف في \`RAILWAY_TOKEN\` | أضفه في \`RAILWAY_API_TOKEN\` بدلاً منه |"
+              echo "| رمز بلا صلاحية على المشروع | أعد إنشاء الرمز من إعدادات الحساب |"
+              echo "| أكثر من مشروع ولا معرّف | أضف \`RAILWAY_PROJECT_ID\` |"
+              echo "| المشروع بلا خدمة | أضف \`RAILWAY_SERVICE\` أو أنشئ خدمة من لوحة Railway |"
             fi
             echo ""
-            echo "**الالتزام:** \`${{ github.sha }}\`"
-            echo "**المشغّل:** ${{ github.actor }}"
+            echo "**الالتزام:** \`${{ github.sha }}\` · **المشغّل:** ${{ github.actor }}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: تنبيه تلجرام عند الفشل
