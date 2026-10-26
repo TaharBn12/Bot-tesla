@@ -4,7 +4,8 @@ import logging
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 from config import Settings
 from engine import Scanner
@@ -12,7 +13,8 @@ from executor import BinanceExecutor, PaperExecutor, TrailingManager
 from risk import KillSwitch
 from strategy import Signal
 import tracker
-from formatting import esc, fmt_positions, fmt_signal, fmt_status
+import opportunities as opp_mod
+from formatting import esc, fmt_opportunities, fmt_positions, fmt_signal, fmt_status
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s | %(message)s", level=logging.INFO)
 log = logging.getLogger("bot")
@@ -22,6 +24,45 @@ STRATEGY_NAME = None   # من config.yaml
 scanner: Scanner | None = None
 executor = None            # BinanceExecutor أو PaperExecutor (حسب الوضع)
 trailer: TrailingManager | None = None
+
+
+def allowed(chat_id) -> bool:
+    """يقصر البوت على المحادثات المصرّح لها فقط (ALLOWED_CHAT_IDS في .env)."""
+    ids = [str(x) for x in (settings.allowed_chats or [settings.chat_id])]
+    return "*" in ids or str(chat_id) in ids
+
+
+def deny(u: Update, c: ContextTypes.DEFAULT_TYPE) -> bool:
+    """إن كانت المحادثة غير مصرّح لها: يرد مرة واحدة ويوقف."""
+    if allowed(u.effective_chat.id):
+        return False
+    log.warning("محادثة غير مصرّح لها: %s", u.effective_chat.id)
+    return True
+
+
+def safe(fn):
+    """يمنع أي خطأ من أن يترك البوت يبدو «معلقاً»: يرد دائماً بشيء."""
+    async def wrapper(u: Update, c: ContextTypes.DEFAULT_TYPE):
+        try:
+            if deny(u, c):
+                return await u.message.reply_text(
+                    f"⛔ هذا البوت خاص.\nمعرّف محادثتك: <code>{u.effective_chat.id}</code>\n"
+                    "أضفه إلى ALLOWED_CHAT_IDS في ملف .env ليصرّح لك.",
+                    parse_mode=ParseMode.HTML)
+            return await fn(u, c)
+        except Exception as e:
+            log.exception("خطأ في %s: %s", fn.__name__, e)
+            try:
+                await u.message.reply_text(
+                    f"⚠️ خطأ في <code>{fn.__name__}</code>:\n<code>{esc(type(e).__name__)}: "
+                    f"{esc(str(e)[:160])}</code>",
+                    parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
 
 
 async def send_signal(sig: Signal):
@@ -45,6 +86,124 @@ async def send_signal(sig: Signal):
         await app.bot.send_message(settings.chat_id, "⚙️ لم تُنفَّذ الصفقة — راجع <code>data/journal.jsonl</code>", parse_mode=ParseMode.HTML)
 
 
+
+# ═══════════════ لوحة الأزرار ═══════════════
+MENU = ReplyKeyboardMarkup(
+    [["📈 صفقات ممكنة", "🎯 أقرب الفرص"],
+     ["📊 حالة السوق", "📉 حالة البوت"],
+     ["📋 نتائج الإشارات", "❓ مساعدة"]],
+    resize_keyboard=True, is_persistent=True,
+    input_field_placeholder="اضغط زراً أو اكتب أمراً…")
+
+
+_OPP_CACHE: dict = {"t": 0.0, "data": None, "scanned": 0}
+
+
+async def cmd_menu(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await u.message.reply_text("اختَر من الأزرار 👇", reply_markup=MENU)
+
+
+async def cmd_ping(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """اختبار سرعة الاستجابة — يجب أن يرد فوراً."""
+    import time
+    await u.message.reply_text(
+        f"🏓 البوت حي — {time.strftime('%H:%M:%S')}\n"
+        f"الأزواج: {len(scanner._symbols) if scanner else 0} | "
+        f"المسحات: {scanner.stats['scans'] if scanner else 0}",
+        reply_markup=MENU)
+
+
+@safe
+async def btn_opportunities(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """الزر الأهم: الصفقات الممكنة الدخول فيها الآن."""
+    import time
+    # رد فوري حتى لا يبدو البوت معلقاً
+    msg = await u.message.reply_text("⏳ أفحص السوق الآن… (ثوانٍ قليلة)")
+
+    # نتيجة محفوظة حديثاً؟ استخدمها فوراً
+    if _OPP_CACHE["data"] is not None and time.time() - _OPP_CACHE["t"] < 45:
+        opps, scanned = _OPP_CACHE["data"], _OPP_CACHE["scanned"]
+        note = "\n<i>(نتيجة محفوظة قبل أقل من دقيقة — اضغط مرة أخرى بعد قليل للتحديث)</i>"
+    else:
+        try:
+            opps = await asyncio.wait_for(
+                scanner.opportunities(min_readiness=66.0, limit=6), timeout=90)
+            scanned = len(scanner._symbols)
+            _OPP_CACHE.update({"t": time.time(), "data": opps, "scanned": scanned})
+            note = ""
+        except asyncio.TimeoutError:
+            await msg.edit_text("⌛ الفحص أخذ وقتاً أطول من المتوقع (تحميل البورصة). جرّب مرة أخرى.")
+            return
+        except Exception as e:
+            log.exception("فرص: %s", e)
+            await msg.edit_text(
+                f"⚠️ تعذّر الفحص: <code>{esc(type(e).__name__)}</code>\n{esc(str(e)[:150])}",
+                parse_mode=ParseMode.HTML)
+            return
+
+    mood = opp_mod.market_mood(opps)
+    text = fmt_opportunities(opps, mood, settings, scanned=scanned) + note
+    try:
+        # ملاحظة: edit_text لا يقبل لوحة أزرار عادية — نعدّل النص فقط
+        await msg.edit_text(text, parse_mode=ParseMode.HTML)
+    except Exception:
+        # إن فشل التعديل (نص طويل/قديم) نرسل رسالة جديدة
+        await u.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=MENU)
+
+
+async def btn_market(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    await cmd_brief(u, c)
+
+
+def _normalize(t: str) -> str:
+    """يحذف الإيموجي والمسافات الزائدة ليصبح المطابق مرناً."""
+    import re
+    t = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F\u200d]", " ", t or "")
+    return " ".join(t.replace("ـ", "").split()).strip().lower()
+
+
+async def menu_router(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """يحوّل أي نص/زر إلى الإجراء المناسب — ولا يترك رسالة بلا رد أبداً."""
+    raw = (u.message.text or "").strip()
+    t = _normalize(raw)
+    log.info("رسالة من %s: %r", u.effective_chat.id, raw)
+
+    # 1) مطابقة دقيقة لعناوين الأزرار أولاً (يمنع تداخل «أقرب الفرص» مع «صفقات ممكنة»)
+    exact = {
+        "صفقات ممكنة": btn_opportunities,
+        "اقرب الفرص": cmd_near,
+        "حالة السوق": btn_market,
+        "حالة البوت": cmd_status,
+        "نتائج الاشارات": cmd_stats,
+        "مساعدة": cmd_start,
+    }
+    for key, fn in exact.items():
+        if t == key or t.startswith(key):
+            await fn(u, c)
+            return
+
+    # 2) ثم الكلمات المفتاحية — الأكثر تخصيصاً أولاً
+    rules = [
+        (("اقرب", "قرب", "near", "جاهز"), cmd_near),
+        (("صفقات", "فرص", "opportun", "توصيات", "دخول"), btn_opportunities),
+        (("سوق", "brief", "ملخص", "ميل"), btn_market),
+        (("حالة البوت", "status", "احصائ", "إحصائ", "stats2"), cmd_status),
+        (("نتائج", "stats", "اداء", "أداء"), cmd_stats),
+        (("مساعدة", "help", "start", "بداية", "اوامر", "أوامر"), cmd_start),
+        (("ping", "بينغ", "اختبار"), cmd_ping),
+    ]
+    for keys, fn in rules:
+        if any(k in t for k in keys):
+            await fn(u, c)
+            return
+
+    # لم نتعرف على النص: نرد دائماً بدل الصمت
+    await u.message.reply_text(
+        f"لم أفهم «{raw[:40]}».\n"
+        "اضغط أحد الأزرار 👇 أو استخدم /near أو /stats",
+        reply_markup=MENU)
+
+
 async def cmd_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(
         "أهلاً 👋\nأنا بوت إشارات العقود الآجلة.\n\n"
@@ -58,7 +217,8 @@ async def cmd_start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "/close SYMBOL — إغلاق مركز\n"
         "/panic — إغلاق كل المراكز\n"
         "/risk — حالة إدارة المخاطر\n"
-        "/id — معرف المحادثة (ضعه في .env)"
+        "/id — معرف المحادثة (ضعه في .env)",
+        reply_markup=MENU,
     )
 
 
@@ -66,7 +226,9 @@ async def cmd_id(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(f"chat_id = <code>{u.effective_chat.id}</code>", parse_mode=ParseMode.HTML)
 
 
+@safe
 async def cmd_status(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    log.info("أمر /status من %s", u.effective_chat.id)
     st = scanner.stats
     extra = {"symbols": len(scanner._symbols)}
     if executor is not None:
@@ -79,12 +241,14 @@ async def cmd_status(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(fmt_status(st, settings, extra), parse_mode=ParseMode.HTML)
 
 
+@safe
 async def cmd_scan(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("جاري المسح…")
     n = await scanner.scan_once()
     await u.message.reply_text(f"تم. إشارات جديدة: {n}")
 
 
+@safe
 async def cmd_positions(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if executor is None:
         return await u.message.reply_text("التنفيذ الآلي غير مفعّل (mode: signals).")
@@ -99,6 +263,7 @@ async def cmd_close(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("أُغلقت ✅" if ok else "لا مركز بهذا الزوج")
 
 
+@safe
 async def cmd_panic(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if executor is None:
         return await u.message.reply_text("التنفيذ غير مفعّل.")
@@ -106,6 +271,7 @@ async def cmd_panic(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(f"🛑 إغلاق كلي: {n} مركز")
 
 
+@safe
 async def cmd_risk(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if executor is None:
         return await u.message.reply_text("التنفيذ غير مفعّل.")
@@ -119,6 +285,7 @@ async def cmd_risk(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 
+@safe
 async def cmd_near(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("أفحص أقرب الفرص…")
     rows = await scanner.nearest(6)
@@ -135,6 +302,7 @@ async def cmd_near(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+@safe
 async def cmd_stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("أحدّث نتائج الإشارات…")
     try:
@@ -163,6 +331,7 @@ async def cmd_stats(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+@safe
 async def cmd_brief(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("أجهّز ملخص السوق…")
     rows = await scanner.nearest(8)
@@ -180,6 +349,7 @@ async def cmd_brief(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+@safe
 async def cmd_symbols(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(", ".join(scanner._symbols[:60]))
 
@@ -205,6 +375,18 @@ async def tracker_loop():
         except Exception as e:
             log.warning("متتبّع الإشارات: %s", e)
         await asyncio.sleep(1800)
+
+
+async def post_shutdown(application: Application):
+    """إغلاق نظيف: يوقف المهام ويغلق اتصال البورصة (يمنع أخطاء الإيقاف)."""
+    for task in asyncio.all_tasks():
+        if task is not asyncio.current_task() and not task.done():
+            task.cancel()
+    try:
+        await scanner.close()
+    except Exception:
+        pass
+    log.info("تم الإيقاف النظيف")
 
 
 async def post_init(application: Application):
@@ -235,7 +417,8 @@ def main():
                                      balance=settings.paper_balance)
             log.warning("لا مفاتيح API — تشغيل ورقي (Paper) بمبلغ %.0f USDT", settings.paper_balance)
         trailer = TrailingManager(executor, scanner.feed, settings.scan_interval)
-    app = Application.builder().token(settings.bot_token).post_init(post_init).build()
+    app = Application.builder().token(settings.bot_token).post_init(post_init)\
+        .concurrent_updates(True).post_shutdown(post_shutdown).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("id", cmd_id))
     app.add_handler(CommandHandler("status", cmd_status))
@@ -249,6 +432,10 @@ def main():
     app.add_handler(CommandHandler("best", cmd_near))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("menu", cmd_menu))
+    app.add_handler(CommandHandler("ping", cmd_ping))
+    app.add_handler(CommandHandler("help", cmd_start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
     app.add_error_handler(on_error)
     log.info("البوت يعمل…")
     app.run_polling(allowed_updates=Update.ALL_TYPES)

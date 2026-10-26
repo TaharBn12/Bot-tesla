@@ -1,0 +1,22 @@
+# استبدل الاسم باسم فريد:  fly apps create trendpulse-tahar
+app = "trendpulse-CHANGE-ME"
+primary_region = "cdg"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[processes]
+  bot = "python src/bot.py"
+
+[env]
+  EXCHANGE = "binanceusdm"
+  TZ = "Africa/Algiers"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "botdata"
+  destination = "/app/data"

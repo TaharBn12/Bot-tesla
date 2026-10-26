@@ -10,6 +10,12 @@ from strategy import STRATEGIES, Signal
 log = logging.getLogger("engine")
 
 
+def _eval(strategy, sym, df):
+    """حساب المؤشرات — يُنفّذ في thread حتى لا يجمّد حلقة الأحداث."""
+    strategy.prepare(df)
+    return strategy.evaluate(sym, df)
+
+
 class Scanner:
     def __init__(self, settings: Settings, strategy_name: str | None, on_signal):
         self.s = settings
@@ -69,8 +75,7 @@ class Scanner:
             async with sem:
                 try:
                     df = await self.feed.candles(sym, self.s.timeframe, 320)
-                    self.strategy.prepare(df)
-                    return self.strategy.evaluate(sym, df)
+                    return await asyncio.to_thread(_eval, self.strategy, sym, df)
                 except Exception as e:
                     log.debug("%s: %s", sym, e)
                     return None
@@ -118,6 +123,43 @@ class Scanner:
         rows = [r for r in await asyncio.gather(*(work(x) for x in self._symbols)) if r]
         rows.sort(key=lambda x: x.get("readiness", 0), reverse=True)
         return rows[:n]
+
+    async def opportunities(self, min_readiness: float = 66.0, limit: int = 8,
+                            min_quote_volume: float = 8_000_000, max_symbols: int = 25) -> list:
+        # ملاحظة: max_symbols يحدّ الفحص اليدوي لأسرع 25 زوجاً سيولة (استجابة سريعة)
+        """يفحص كل الأزواج ويُعيد الفرص القابلة للدخول الآن (مرتبة بالجودة)."""
+        import opportunities as opp_mod
+        sem = asyncio.Semaphore(6)
+        # فلتر السيولة: يستبعد أزواج الأسهم المُرمّزة والأزواج الميتة على البورصات غير المتوقعة
+        try:
+            tick = await self.feed.tickers()
+        except Exception:
+            tick = {}
+        liquid = set()
+        for sym, t in tick.items():
+            if (t.get("quoteVolume") or 0) >= min_quote_volume:
+                liquid.add(sym)
+        universe = [s for s in self._symbols if s in liquid] or self._symbols
+        if max_symbols and len(universe) > max_symbols:
+            # نختار الأعلى سيولة
+            ranked = sorted(universe, key=lambda x: (tick.get(x, {}).get("quoteVolume") or 0), reverse=True)
+            universe = ranked[:max_symbols]
+
+        async def work(sym):
+            async with sem:
+                try:
+                    df = await self.feed.candles(sym, self.s.timeframe, 400)
+                    return await asyncio.to_thread(
+                        opp_mod.build, sym, df, self.strategy,
+                        getattr(self.s, "paper_balance", 1000.0),
+                        self.s.risk_per_trade_pct, self.s.leverage, min_readiness)
+                except Exception:
+                    return None
+
+        found = [o for o in await asyncio.gather(*(work(s) for s in universe)) if o]
+        order = {"A": 0, "B": 1, "C": 2}
+        found.sort(key=lambda o: (order.get(o.grade, 9), -o.readiness))
+        return found[:limit]
 
     async def run_forever(self):
         await self.ensure_universe()

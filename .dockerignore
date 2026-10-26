@@ -1,0 +1,9 @@
+.git/
+.env
+data/cache/
+data/*.jsonl
+data/bot.log
+__pycache__/
+*.pyc
+.venv/
+futures-signal-bot.zip

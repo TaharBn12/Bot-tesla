@@ -13,6 +13,7 @@ load_dotenv(ROOT / ".env")
 class Settings:
     bot_token: str
     chat_id: str
+    allowed_chats: list = field(default_factory=list)
     exchange: str = "binanceusdm"      # binanceusdm | bybit | okx
     timeframe: str = "15m"
     scan_interval: int = 60            # كل كم ثانية يعيد المسح
@@ -54,6 +55,8 @@ class Settings:
                 setattr(s, k, raw[k])
         if os.getenv("EXCHANGE"):        # تجاوز سريع للاختبار
             s.exchange = os.getenv("EXCHANGE")
+        raw_allowed = os.getenv("ALLOWED_CHAT_IDS", "")
+        s.allowed_chats = [x.strip() for x in raw_allowed.split(",") if x.strip()] or [str(s.chat_id)]
         s.api_key = os.getenv("EXCHANGE_API_KEY", "")
         s.api_secret = os.getenv("EXCHANGE_API_SECRET", "")
         s.symbols = list(s.symbols or [])   # فارغة = وضع ديناميكي (أعلى سيولة)

@@ -64,3 +64,40 @@ def fmt_status(stats: dict, settings, extra: dict | None = None) -> str:
     if "mode" in extra:
         lines.append(f"الوضع: {esc(extra['mode'])}")
     return "\n".join(lines)
+
+
+def fmt_opportunities(opps: list, mood: dict, settings, scanned: int = 0) -> str:
+    """رسالة «الصفقات الممكنة الدخول فيها الآن» — تُرسل عند الضغط على الزر."""
+    if not opps:
+        return ("🔍 <b>لا توجد فرص قابلة للدخول الآن</b>\n"
+                f"فحصت {scanned} زوجاً على فريم {esc(settings.timeframe)}.\n\n"
+                "لا يوجد اتجاه واضح بشروط كافية — الانتظار قرار صحيح.\n"
+                "جرّب الزر بعد إغلاق الشمعة القادمة.")
+
+    head = [
+        "📈 <b>الصفقات الممكنة الآن</b>",
+        f"فريم <code>{esc(settings.timeframe)}</code> | فحصت {scanned} زوجاً | وجدت <b>{len(opps)}</b>",
+        f"ميل السوق: <b>{esc(mood['mood'])}</b> ({mood['LONG']} شراء / {mood['SHORT']} بيع)",
+        "──────────────",
+    ]
+    blocks = []
+    for o in opps:
+        tag = "🟢 شراء" if o.side == "LONG" else "🔴 بيع"
+        grade = {"A": "🅰️ مكتملة", "B": "🅱️ قوية", "C": "🆑 ممكنة"}.get(o.grade, o.grade)
+        tps = " / ".join(f"<code>{t:.6g}</code>" for t in o.targets)
+        lines = [
+            f"<b>{esc(o.symbol)}</b> — {tag} | {grade} | جاهزية {o.readiness:.0f}%",
+            f"  ▶ دخول الآن: <code>{o.entry:.6g}</code>",
+            f"  ▶ أفضل منطقة: <code>{o.entry_zone[0]:.6g} → {o.entry_zone[1]:.6g}</code>",
+            f"  ▶ ستوب: <code>{o.stop:.6g}</code> ({o.risk_pct}%)",
+            f"  ▶ أهداف: {tps}",
+            f"  ▶ كمية (مخاطرة {settings.risk_per_trade_pct}%): <code>{o.qty}</code> ≈ {o.notional}$ | {o.leverage}x",
+            f"  ▶ السبب: {esc(o.reason)}",
+        ]
+        if o.missing:
+            lines.append(f"  ▶ ينقص: {esc('، '.join(o.missing))}")
+        blocks.append("\n".join(lines))
+    foot = ["──────────────",
+            "🅰️ = إشارة مكتملة تُرسل تلقائياً | 🅱️ = ينقص شرط واحد | 🆑 = ينقص أكثر من شرط",
+            "⚠️ خطة للدراسة لا ضمان. الأفضل الانتظار حتى تصبح 🅰️"]
+    return "\n".join(head) + "\n\n" + "\n\n".join(blocks) + "\n" + "\n".join(foot)
