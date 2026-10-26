@@ -147,7 +147,11 @@ def test_open_flow():
     stop = ex.orders[1]
     check("أمر ستوب أُرسل بعد الدخول", stop["type"] == "STOP_MARKET" and stop["side"] == "sell")
     check("الستوب closePosition=True", stop["params"].get("closePosition") is True)
-    check("الستوب reduceOnly=True", stop["params"].get("reduceOnly") is True)
+    # Binance يرفض إرسال closePosition و reduceOnly معاً (خطأ -1106)
+    check("الستوب closePosition=True", stop["params"].get("closePosition") is True)
+    check("الستوب بلا reduceOnly (قاعدة Binance -1106)",
+          stop["params"].get("reduceOnly") is not True)
+    check("الستوب بسعر صالح > 0", float(stop["params"].get("stopPrice") or 0) > 0)
     check("سعر الستوب مُقرَّب صحيحاً", stop["params"].get("stopPrice") == 95.0, stop["params"])
 
 

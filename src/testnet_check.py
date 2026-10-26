@@ -78,7 +78,8 @@ async def main() -> int:
         "apiKey": key, "secret": secret, "enableRateLimit": True,
         "options": {"defaultType": "swap", "adjustForTimeDifference": True},
     })
-    ex.set_sandbox_mode(True)
+    from binance_testnet import enable_futures_testnet
+    enable_futures_testnet(ex)
 
     try:
         # 1) الاتصال والرصيد
@@ -127,17 +128,35 @@ async def main() -> int:
                 await ex.set_margin_mode("isolated", SYMBOL)
             except Exception:
                 pass
-            qty = float(limits.get("amount", {}).get("min") or 0.001)
+            # الحد الأدنى لقيمة الأمر على Binance Futures هو 50 USDT
+            # لذلك نحسب الكمية من السعر لا من أدنى كمية مسموحة
+            min_notional = 60.0
+            price_now = float((await ex.fetch_ticker(SYMBOL)).get("last") or 0)
+            step = float(limits.get("amount", {}).get("min") or 0.0001)
+            qty = round(min_notional / price_now / step) * step if price_now else 0
+            qty = float(f"{qty:.8f}")
+            print(f"   ℹ️ السعر {price_now:.1f} → الكمية {qty} (قيمة ~{qty * price_now:.1f} USDT)")
             try:
                 o = await ex.create_order(SYMBOL, "market", "buy", qty,
                                           params={"newClientOrderId": "testnet-probe"})
                 fill = float(o.get("average") or o.get("price") or 0)
+                if fill <= 0:
+                    # أمر السوق قد لا يعيد سعر التنفيذ → نقرأه من المركز
+                    try:
+                        pos = await ex.fetch_positions([SYMBOL])
+                        fill = float((pos[0] or {}).get("entryPrice") or 0) if pos else 0
+                    except Exception:
+                        fill = 0
+                    if fill <= 0:
+                        fill = float((await ex.fetch_ticker(SYMBOL)).get("last") or 0)
+                    print(f"   ℹ️ سعر التنفيذ من المركز/السوق: {fill}")
                 rep.add("أمر دخول Market", True, f"كمية {qty} @ {fill}")
                 try:
                     stop = await ex.create_order(
                         SYMBOL, "STOP_MARKET", "sell", None,
-                        params={"stopPrice": round(fill * 0.97, 1), "closePosition": True,
-                                "reduceOnly": True, "workingType": "MARK_PRICE"})
+                        params={"stopPrice": float(ex.price_to_precision(SYMBOL, fill * 0.97)),
+                                "closePosition": True,
+                                "workingType": "MARK_PRICE"})
                     rep.add("أمر ستوب (closePosition)", True, f"id={stop.get('id')}")
                     try:
                         await ex.cancel_order(stop["id"], SYMBOL)

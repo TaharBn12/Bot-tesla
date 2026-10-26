@@ -107,6 +107,8 @@ jobs:
           TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
           ALLOWED: ${{ secrets.ALLOWED_CHAT_IDS }}
           EXCH: ${{ secrets.EXCHANGE_NAME }}
+          EX_KEY: ${{ secrets.EXCHANGE_API_KEY }}
+          EX_SECRET: ${{ secrets.EXCHANGE_API_SECRET }}
           SVC: ${{ steps.svc.outputs.svc }}
         run: |
           export RAILWAY_TOKEN=$(printf '%s' "$RAILWAY_TOKEN" | tr -d '[:space:]')
@@ -124,6 +126,15 @@ jobs:
             --set "EXCHANGE=${EXCH:-okx}" \
             --set "PYTHONUNBUFFERED=1" \
             --set "TZ=Africa/Algiers" 2>&1 | tail -5
+
+          if [ -n "$EX_KEY" ] && [ -n "$EX_SECRET" ]; then
+            railway variables --service "$SVC" \
+              --set "EXCHANGE_API_KEY=$(printf '%s' "$EX_KEY" | tr -d '[:space:]')" \
+              --set "EXCHANGE_API_SECRET=$(printf '%s' "$EX_SECRET" | tr -d '[:space:]')" 2>&1 | tail -3
+            echo "✅ مفاتيح البورصة مزامَنة"
+          else
+            echo "::notice::لا مفاتيح بورصة في الأسرار — سيعمل البوت على الإشارات فقط"
+          fi
           echo "✅ المتغيّرات مضبوطة"
 
       # ════════════ النشر (رمز المشروع) ════════════

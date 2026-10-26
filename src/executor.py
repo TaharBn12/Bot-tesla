@@ -232,7 +232,12 @@ class BinanceExecutor(BaseExecutor):
                 "apiKey": settings.api_key, "secret": settings.api_secret,
                 "enableRateLimit": True, "options": {"defaultType": "swap"}})
             if self.testnet:
-                exchange.set_sandbox_mode(True)
+                # ccxt أزالت دعم set_sandbox_mode للفيوتشرز → توجيه يدوي
+                try:
+                    from .binance_testnet import enable_futures_testnet
+                except ImportError:
+                    from binance_testnet import enable_futures_testnet
+                enable_futures_testnet(exchange)
         self.ex = exchange
         self._pos: dict[str, Position] = {}
         journal("executor_init", symbol="", mode="LIVE" if self.live else "TESTNET")
@@ -345,8 +350,18 @@ class BinanceExecutor(BaseExecutor):
         close_side = "sell" if pos.side == "LONG" else "buy"
         return self.ex.create_order(
             pos.symbol, "STOP_MARKET", close_side, None,
-            params={"stopPrice": pos.sl, "closePosition": True, "reduceOnly": True,
+            # ⚠️ Binance يرفض closePosition + reduceOnly معاً (خطأ -1106).
+            # closePosition وحده يُغلق المركز كاملاً — وهو المطلوب للستوب.
+            params={"stopPrice": self._fmt_price(pos.symbol, pos.sl),
+                    "closePosition": True,
                     "workingType": "MARK_PRICE", "newClientOrderId": f"sl-{pos.client_id}"})
+
+    def _fmt_price(self, symbol: str, price: float):
+        """تقريب السعر لدقة الزوج — بأمان إن لم تكن الدالة متاحة (اختبارات)."""
+        try:
+            return float(self.ex.price_to_precision(symbol, price))
+        except Exception:
+            return price
 
     def _fill_price(self, order: dict, fallback: float) -> float:
         try:
