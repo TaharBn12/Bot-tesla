@@ -9,7 +9,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 from config import Settings
 from engine import Scanner
-from executor import BinanceExecutor, PaperExecutor, TrailingManager
+from executor import BinanceExecutor, PaperExecutor, TrailingManager, journal
 from risk import KillSwitch
 from strategy import Signal
 import tracker
@@ -390,6 +390,14 @@ async def post_shutdown(application: Application):
 
 
 async def post_init(application: Application):
+    global STARTUP_WARNING
+    if STARTUP_WARNING:
+        try:
+            await application.bot.send_message(settings.chat_id, STARTUP_WARNING,
+                                               parse_mode=ParseMode.HTML)
+        except Exception as e:
+            log.warning("تعذّر إرسال تنبيه البدء: %s", e)
+        STARTUP_WARNING = None
     asyncio.create_task(scanner.run_forever())
     asyncio.create_task(tracker_loop())
     if trailer is not None:
@@ -398,6 +406,7 @@ async def post_init(application: Application):
 
 
 app: Application | None = None
+STARTUP_WARNING: str | None = None   # يُرسل بعد بدء التطبيق (app غير جاهز قبله)
 
 
 def main():
@@ -415,7 +424,27 @@ def main():
         else:
             executor = PaperExecutor(settings, scanner.feed, kill_switch=kill,
                                      balance=settings.paper_balance)
-            log.warning("لا مفاتيح API — تشغيل ورقي (Paper) بمبلغ %.0f USDT", settings.paper_balance)
+            # ⚠️ فخّ شائع: وضع autotrade + بورصة ليست binanceusdm (مثل EXCHANGE=okx)
+            # يعني تنفيذاً ورقياً وليس أوامر حقيقية على Binance — يجب أن يكون صريحاً.
+            if settings.exchange != "binanceusdm":
+                msg = (
+                    f"⚠️ <b>تنفيذ ورقي — لا أوامر على Binance</b>\n"
+                    f"البورصة الحالية: <code>{settings.exchange}</code>\n"
+                    f"التنفيذ الحقيقي يعمل مع <code>binanceusdm</code> فقط.\n"
+                    f"أزل <code>EXCHANGE</code> من البيئة ليعمل على Binance."
+                )
+                log.error("وضع autotrade لكن البورصة %s — تنفيذ ورقي فقط", settings.exchange)
+                journal("executor_paper_fallback", symbol="",
+                        reason=f"البورصة {settings.exchange} لا تدعم التنفيذ — ورقي")
+            elif not settings.api_key:
+                msg = ("⚠️ <b>تنفيذ ورقي — لا مفاتيح API</b>\n"
+                       "أضف <code>EXCHANGE_API_KEY</code> و<code>EXCHANGE_API_SECRET</code> في .env")
+                log.warning("لا مفاتيح API — تشغيل ورقي (Paper) بمبلغ %.0f USDT", settings.paper_balance)
+            else:
+                msg = None
+            if msg:
+                global STARTUP_WARNING
+                STARTUP_WARNING = msg
         trailer = TrailingManager(executor, scanner.feed, settings.scan_interval)
     app = Application.builder().token(settings.bot_token).post_init(post_init)\
         .concurrent_updates(True).post_shutdown(post_shutdown).build()
