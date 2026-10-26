@@ -1,11 +1,14 @@
 """بوت تلجرام: أوامر + إرسال الإشارات + تشغيل المحرّك مع البوت في نفس الحلقة."""
 import asyncio
 import logging
+import time
+import uuid
 
 from telegram import Update
 from telegram.constants import ParseMode
-from telegram import ReplyKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import (Application, CallbackQueryHandler, CommandHandler,
+                          ContextTypes, MessageHandler, filters)
 
 from config import Settings
 from engine import Scanner
@@ -24,6 +27,17 @@ STRATEGY_NAME = None   # من config.yaml
 scanner: Scanner | None = None
 executor = None            # BinanceExecutor أو PaperExecutor (حسب الوضع)
 trailer: TrailingManager | None = None
+
+# ═══ الموافقة اليدوية: كل صفقة رسالة مستقلة بزر تنفيذ ═══
+PENDING: dict[str, dict] = {}      # token → {sig, exp, chat, msg_id}
+APPROVAL_TTL = 3600                 # صلاحية زر الموافقة: ساعة
+
+
+def _kb(tok: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ تنفيذ الصفقة", callback_data=f"ap:{tok}"),
+        InlineKeyboardButton("❌ تجاهل", callback_data=f"rj:{tok}"),
+    ]])
 
 
 def allowed(chat_id) -> bool:
@@ -66,9 +80,27 @@ def safe(fn):
 
 
 async def send_signal(sig: Signal):
-    await app.bot.send_message(settings.chat_id, fmt_signal(sig, settings), parse_mode=ParseMode.HTML)
+    text = fmt_signal(sig, settings)
     tracker.log_signal(sig, settings.timeframe)
     log.info("إشارة: %s %s", sig.side, sig.symbol)
+
+    # ═══ وضع الموافقة: رسالة مستقلة لكل صفقة + زر تنفيذ ═══
+    if executor is not None and settings.mode == "approve":
+        tok = uuid.uuid4().hex[:10]
+        PENDING[tok] = {"sig": sig, "exp": time.time() + APPROVAL_TTL,
+                        "chat": settings.chat_id, "msg_id": None}
+        try:
+            m = await app.bot.send_message(
+                settings.chat_id,
+                text + "\n\n⏳ <b>بانتظار موافقتك</b> — اضغط ✅ للتنفيذ على البورصة",
+                parse_mode=ParseMode.HTML, reply_markup=_kb(tok))
+            PENDING[tok]["msg_id"] = m.message_id
+        except Exception as e:
+            log.error("تعذّر إرسال رسالة الموافقة: %s", e)
+            PENDING.pop(tok, None)
+        return
+
+    await app.bot.send_message(settings.chat_id, text, parse_mode=ParseMode.HTML)
 
     if executor is None:
         return
@@ -85,6 +117,122 @@ async def send_signal(sig: Signal):
     else:
         await app.bot.send_message(settings.chat_id, "⚙️ لم تُنفَّذ الصفقة — راجع <code>data/journal.jsonl</code>", parse_mode=ParseMode.HTML)
 
+
+
+@safe
+async def cmd_demo(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """إشارة تجريبية بزر تنفيذ — لاختبار الموافقة يدوياً بأمان."""
+    if executor is None:
+        return await u.message.reply_text(
+            "المحرّك غير مفعّل. اضبط <code>mode: approve</code> في config.yaml.",
+            parse_mode=ParseMode.HTML)
+    await u.message.reply_text("🔧 أجهّز إشارة تجريبية…")
+    try:
+        ex = executor.ex
+        sym = "BTC/USDT:USDT"
+        await asyncio.to_thread(ex.load_markets)
+        t = await asyncio.to_thread(ex.fetch_ticker, sym)
+        price = float(t["last"])
+        atr = price * 0.01
+        sig = Signal(symbol=sym, side="LONG", entry=price,
+                     stop_loss=round(price - 1.5 * atr, 1),
+                     take_profits=[round(price + 2 * atr, 1),
+                                   round(price + 3.5 * atr, 1)],
+                     leverage=settings.leverage, atr=atr,
+                     reason="إشارة تجريبية — ليست من الاستراتيجية", setup="test")
+    except Exception as e:
+        return await u.message.reply_text(
+            f"⚠️ تعذّر جلب السعر: <code>{esc(str(e)[:150])}</code>", parse_mode=ParseMode.HTML)
+
+    await send_signal(sig)
+
+
+# ═══════════════ الموافقة اليدوية على الصفقات ═══════════════
+def _exec_mode_tag() -> str:
+    if executor is None:
+        return "ورقية"
+    if getattr(executor, "live", False):
+        return "حقيقية 🔴"
+    return "Testnet 🟡" if executor.name == "binance" else "ورقية 🟢"
+
+
+async def on_approval(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """زر ✅ تنفيذ / ❌ تجاهل تحت كل صفقة."""
+    q = u.callback_query
+    try:
+        await q.answer()                     # أوقف دوران الساعة فوراً
+    except Exception:
+        pass
+
+    chat = q.message.chat_id
+    if not allowed(chat):
+        try:
+            await q.answer("⛔ غير مصرّح", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    data = q.data or ""
+    action, _, tok = data.partition(":")
+    rec = PENDING.get(tok)
+
+    async def edit(txt: str):
+        try:
+            # نمرّر لوحة فارغة لإزالة الأزرار بعد الضغط (وإلا تبقى قابلة للنقر)
+            await q.edit_message_text(txt, parse_mode=ParseMode.HTML,
+                                      reply_markup=InlineKeyboardMarkup([]))
+        except Exception:
+            try:
+                await q.message.reply_text(txt, parse_mode=ParseMode.HTML)
+            except Exception:
+                pass
+
+    # زر قديم أو مُستخدَم
+    if not rec:
+        return await edit("⌛ <b>انتهت صلاحية هذه الصفقة</b>\n"
+                          "أُرسلت منذ أكثر من ساعة أو نُفِّذت سابقاً.\n"
+                          "استخدم <code>/scan</code> لمسح جديد.")
+
+    sig = rec["sig"]
+
+    # ❌ تجاهل
+    if action == "rj":
+        PENDING.pop(tok, None)
+        return await edit(fmt_signal(sig, settings) + "\n\n❌ <b>تم التجاهل — لم تُنفَّذ</b>")
+
+    # انتهت المدة
+    if time.time() > rec["exp"]:
+        PENDING.pop(tok, None)
+        return await edit(fmt_signal(sig, settings) + "\n\n⌛ <b>انتهت الصلاحية — لم تُنفَّذ</b>")
+
+    if executor is None:
+        PENDING.pop(tok, None)
+        return await edit("⚠️ المحرّك غير مفعّل — شغّل البوت بوضع <code>approve</code>")
+
+    # ✅ تنفيذ
+    await edit(fmt_signal(sig, settings) + "\n\n⏳ <b>جاري التنفيذ على البورصة…</b>")
+    try:
+        pos = await asyncio.to_thread(executor.open, sig)
+    except Exception as e:
+        log.exception("فشل التنفيذ من زر الموافقة")
+        PENDING.pop(tok, None)
+        return await edit(fmt_signal(sig, settings) +
+                          f"\n\n❌ <b>فشل التنفيذ</b>\n<code>{esc(type(e).__name__)}: {esc(str(e)[:180])}</code>")
+
+    PENDING.pop(tok, None)
+
+    if pos:
+        return await edit(
+            fmt_signal(sig, settings) +
+            f"\n\n✅ <b>نُفِّذت الصفقة — {_exec_mode_tag()}</b>\n"
+            f"<code>{esc(pos.side)} {esc(pos.symbol)}</code>\n"
+            f"الكمية: <code>{esc(pos.qty)}</code> @ <code>{esc(pos.entry)}</code>\n"
+            f"الستوب على البورصة: <code>{esc(pos.sl)}</code>\n"
+            f"المخاطرة: {esc(pos.risk_amount)} USDT")
+
+    return await edit(fmt_signal(sig, settings) +
+                      "\n\n⚠️ <b>لم تُفتح الصفقة</b> — راجع "
+                      "<code>data/journal.jsonl</code> (غالباً: سقف الصفقات أو مفتاح الإيقاف)")
 
 
 # ═══════════════ لوحة الأزرار ═══════════════
@@ -415,28 +563,20 @@ def main():
         raise SystemExit("ضع TELEGRAM_BOT_TOKEN في ملف .env")
     global executor, trailer
     scanner = Scanner(settings, STRATEGY_NAME, send_signal)
-    if settings.mode == "autotrade":
+    if settings.mode in ("autotrade", "approve"):
         kill = KillSwitch(settings.max_daily_loss_pct, settings.max_trades_per_day,
                           settings.max_consecutive_losses)
-        if settings.exchange == "binanceusdm" and settings.api_key:
+        # التنفيذ دائماً على Binance Futures — منفصل عن بورصة المسح (قد تكون okx بسبب الحجب)
+        if settings.api_key:
             executor = BinanceExecutor(settings, kill_switch=kill)
-            log.info("منفّذ Binance — %s", "LIVE" if executor.live else "TESTNET")
+            log.info("منفّذ Binance — %s | المسح من %s",
+                     "LIVE" if executor.live else "TESTNET", settings.exchange)
         else:
             executor = PaperExecutor(settings, scanner.feed, kill_switch=kill,
                                      balance=settings.paper_balance)
             # ⚠️ فخّ شائع: وضع autotrade + بورصة ليست binanceusdm (مثل EXCHANGE=okx)
             # يعني تنفيذاً ورقياً وليس أوامر حقيقية على Binance — يجب أن يكون صريحاً.
-            if settings.exchange != "binanceusdm":
-                msg = (
-                    f"⚠️ <b>تنفيذ ورقي — لا أوامر على Binance</b>\n"
-                    f"البورصة الحالية: <code>{settings.exchange}</code>\n"
-                    f"التنفيذ الحقيقي يعمل مع <code>binanceusdm</code> فقط.\n"
-                    f"أزل <code>EXCHANGE</code> من البيئة ليعمل على Binance."
-                )
-                log.error("وضع autotrade لكن البورصة %s — تنفيذ ورقي فقط", settings.exchange)
-                journal("executor_paper_fallback", symbol="",
-                        reason=f"البورصة {settings.exchange} لا تدعم التنفيذ — ورقي")
-            elif not settings.api_key:
+            if not settings.api_key:
                 msg = ("⚠️ <b>تنفيذ ورقي — لا مفاتيح API</b>\n"
                        "أضف <code>EXCHANGE_API_KEY</code> و<code>EXCHANGE_API_SECRET</code> في .env")
                 log.warning("لا مفاتيح API — تشغيل ورقي (Paper) بمبلغ %.0f USDT", settings.paper_balance)
@@ -464,6 +604,8 @@ def main():
     app.add_handler(CommandHandler("menu", cmd_menu))
     app.add_handler(CommandHandler("ping", cmd_ping))
     app.add_handler(CommandHandler("help", cmd_start))
+    app.add_handler(CommandHandler("demo", cmd_demo))
+    app.add_handler(CallbackQueryHandler(on_approval, pattern=r"^(ap|rj):"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
     app.add_error_handler(on_error)
     log.info("البوت يعمل…")

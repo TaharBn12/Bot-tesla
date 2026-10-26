@@ -25,8 +25,8 @@ risk_per_trade_pct: 1.0
 max_open_positions: 3      # ⭐ سقف الصفقات المتزامنة (يخفض التراجع من -35% إلى -16%)
 
 # ---- التنفيذ الآلي ----
-mode: signals              # signals = إشارات فقط (ابدأ بهذا) | autotrade = تنفيذ فعلي
-dry_run: true              # في وضع autotrade: يسجّل ما كان سيفعله بلا إرسال أوامر
+mode: approve              # signals = إشارات فقط | approve = إشارة + زر تنفيذ يدوي | autotrade = تنفيذ تلقائي
+dry_run: false             # false = الأزرار ترسل أوامر فعلية إلى Binance (Testnet ما دام ALLOW_LIVE فارغاً)
 paper_balance: 1000        # الرصيد الافتراضي في الوضع الورقي
 trail_atr: 3.5             # مضاعف ATR للستوب المتتبّع
 
